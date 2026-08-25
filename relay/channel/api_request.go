@@ -13,10 +13,12 @@ import (
 	"time"
 
 	common2 "github.com/QuantumNous/new-api/common"
+	rootconstant "github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relay/helper"
+	"github.com/QuantumNous/new-api/relay/imagebridge"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
@@ -566,6 +568,20 @@ func sendPingData(c *gin.Context, mutex *sync.Mutex) error {
 	return nil
 }
 
+var nativeImageBridgePingInterval = 15 * time.Second
+
+func wantsDownstreamSSE(c *gin.Context, info *common.RelayInfo) bool {
+	if info != nil && info.IsStream {
+		return true
+	}
+	return c != nil && common2.GetContextKeyBool(c, rootconstant.ContextKeyIsStream)
+}
+
+func forceNativeImageBridgePing(c *gin.Context) bool {
+	intent, ok := imagebridge.FromContext(c)
+	return ok && intent.Stream && intent.Envelope != imagebridge.EnvelopeImages
+}
+
 func DoRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http.Response, error) {
 	return doRequest(c, req, info)
 }
@@ -600,12 +616,16 @@ func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 
 	var stopPinger context.CancelFunc
 	var pingerDone <-chan struct{}
-	if info.IsStream {
+	if wantsDownstreamSSE(c, info) {
 		helper.SetEventStreamHeaders(c)
 		// Keep an established streaming response alive with legal SSE pings.
 		generalSettings := operation_setting.GetGeneralSetting()
-		if generalSettings.PingIntervalEnabled && !info.DisablePing {
+		forceBridgePing := forceNativeImageBridgePing(c)
+		if (generalSettings.PingIntervalEnabled || forceBridgePing) && !info.DisablePing {
 			pingInterval := time.Duration(generalSettings.PingIntervalSeconds) * time.Second
+			if forceBridgePing && (pingInterval <= 0 || pingInterval > nativeImageBridgePingInterval) {
+				pingInterval = nativeImageBridgePingInterval
+			}
 			stopPinger, pingerDone = startPingKeepAlive(c, pingInterval)
 			// Stop and join the ping goroutine on every return path.
 			defer func() {

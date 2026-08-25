@@ -16,6 +16,7 @@ import (
 	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/model"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
+	"github.com/QuantumNous/new-api/relay/imagebridge"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
@@ -35,6 +36,10 @@ func Distribute() func(c *gin.Context) {
 		var channel *model.Channel
 		channelId, ok := common.GetContextKey(c, constant.ContextKeyTokenSpecificChannelId)
 		modelRequest, shouldSelectChannel, err := getModelRequest(c)
+		requestPath := c.Request.URL.Path
+		if intent, matched := imagebridge.FromContext(c); matched {
+			requestPath = intent.UpstreamPath()
+		}
 		if err != nil {
 			abortWithOpenAiMessage(c, http.StatusBadRequest, i18n.T(c, i18n.MsgDistributorInvalidRequest, map[string]any{"Error": err.Error()}))
 			return
@@ -106,7 +111,7 @@ func Distribute() func(c *gin.Context) {
 					affinityUsable := false
 					preferred, err := model.CacheGetChannel(preferredChannelID)
 					if err == nil && preferred != nil && preferred.Status == common.ChannelStatusEnabled &&
-						channelSupportsRequestPath(preferred, c.Request.URL.Path, modelRequest.Model) {
+						channelSupportsRequestPath(preferred, requestPath, modelRequest.Model) {
 						if usingGroup == "auto" {
 							userGroup := common.GetContextKeyString(c, constant.ContextKeyUserGroup)
 							autoGroups := service.GetRequestAutoGroups(c, userGroup)
@@ -137,7 +142,7 @@ func Distribute() func(c *gin.Context) {
 						Ctx:         c,
 						ModelName:   modelRequest.Model,
 						TokenGroup:  usingGroup,
-						RequestPath: c.Request.URL.Path,
+						RequestPath: requestPath,
 						Retry:       common.GetPointer(0),
 					})
 					if err != nil {
@@ -251,6 +256,9 @@ func getJSONStringValue(result gjson.Result, field string) (string, error) {
 }
 
 func getModelRequest(c *gin.Context) (*ModelRequest, bool, error) {
+	if intent, ok := imagebridge.FromContext(c); ok {
+		return &ModelRequest{Model: intent.Request.Model}, true, nil
+	}
 	var modelRequest ModelRequest
 	shouldSelectChannel := true
 	var err error

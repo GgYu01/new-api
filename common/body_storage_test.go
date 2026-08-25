@@ -359,9 +359,9 @@ func TestCreateBodyStorageSupportsSixteenConcurrentLargeBodiesWithinReservedBudg
 func TestSixteenUnknownLargeBodiesKeepHeapBoundedAndReturnToBaseline(t *testing.T) {
 	const (
 		workers   = 16
-		bodyBytes = int64(8 << 20)
+		bodyBytes = int64(48 << 20)
 	)
-	configureBodyStorageDiskCache(t, 1, 256)
+	configureBodyStorageDiskCache(t, 1, 1024)
 	runtime.GC()
 	var before runtime.MemStats
 	runtime.ReadMemStats(&before)
@@ -405,7 +405,7 @@ func TestSixteenUnknownLargeBodiesKeepHeapBoundedAndReturnToBaseline(t *testing.
 			storage, err := CreateBodyStorageFromReader(
 				&fixedSizeZeroReader{remaining: bodyBytes},
 				-1,
-				16<<20,
+				48<<20,
 			)
 			results <- result{storage: storage, err: err}
 		}()
@@ -423,8 +423,8 @@ func TestSixteenUnknownLargeBodiesKeepHeapBoundedAndReturnToBaseline(t *testing.
 		storages = append(storages, got.storage)
 	}
 	peakGrowth := peakHeap.Load() - before.HeapAlloc
-	t.Logf("peak heap growth for sixteen concurrent 8 MiB unknown bodies: %d bytes", peakGrowth)
-	require.Less(t, peakGrowth, uint64(96<<20), "the heap must not retain sixteen complete 8 MiB bodies")
+	t.Logf("peak heap growth for sixteen concurrent 48 MiB unknown bodies: %d bytes", peakGrowth)
+	require.Less(t, peakGrowth, uint64(96<<20), "the heap must not retain sixteen complete 48 MiB bodies")
 
 	for _, storage := range storages {
 		require.NoError(t, storage.Close())

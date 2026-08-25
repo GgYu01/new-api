@@ -20,6 +20,7 @@ import (
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relay/helper"
+	"github.com/QuantumNous/new-api/relay/imagebridge"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
@@ -93,6 +94,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		newAPIError *types.NewAPIError
 		ws          *websocket.Conn
 	)
+	bridgeIntent, isImageBridge := imagebridge.FromContext(c)
 
 	if relayFormat == types.RelayFormatOpenAIRealtime {
 		var err error
@@ -108,6 +110,13 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		if newAPIError != nil {
 			logger.LogError(c, fmt.Sprintf("relay error: %s", common.LocalLogPreview(newAPIError.Error())))
 			newAPIError.SetMessage(common.MessageWithRequestId(newAPIError.Error(), requestId))
+			if isImageBridge && bridgeIntent.Stream && c.Writer.Written() {
+				if err := imagebridge.WriteFailure(c.Writer, *bridgeIntent, imagebridge.NewIDs(requestId), newAPIError.Error()); err != nil {
+					logger.LogInfo(c, fmt.Sprintf("image bridge failure SSE downstream disconnected: %v", err))
+				}
+				c.Writer.Flush()
+				return
+			}
 			switch relayFormat {
 			case types.RelayFormatOpenAIRealtime:
 				helper.WssError(c, ws, newAPIError.ToOpenAIError())
@@ -124,20 +133,44 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		}
 	}()
 
-	request, err := helper.GetAndValidateRequest(c, relayFormat)
-	if err != nil {
-		if status, handled := requestBodyStorageErrorStatus(c, err); handled {
-			newAPIError = types.NewErrorWithStatusCode(err, types.ErrorCodeReadRequestBodyFailed, status, types.ErrOptionWithSkipRetry())
-		} else {
-			newAPIError = types.NewError(err, types.ErrorCodeInvalidRequest)
+	var request dto.Request
+	if isImageBridge {
+		bridgeRequest := bridgeIntent.Request
+		upstreamStream := false
+		bridgeRequest.Stream = &upstreamStream
+		if strings.TrimSpace(bridgeRequest.Prompt) == "" {
+			newAPIError = types.NewError(fmt.Errorf("image prompt is empty"), types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
+			return
 		}
-		return
+		request = &bridgeRequest
+		relayFormat = types.RelayFormatOpenAIImage
+	} else {
+		var err error
+		request, err = helper.GetAndValidateRequest(c, relayFormat)
+		if err != nil {
+			if status, handled := requestBodyStorageErrorStatus(c, err); handled {
+				newAPIError = types.NewErrorWithStatusCode(err, types.ErrorCodeReadRequestBodyFailed, status, types.ErrOptionWithSkipRetry())
+			} else {
+				newAPIError = types.NewError(err, types.ErrorCodeInvalidRequest)
+			}
+			return
+		}
 	}
 
 	relayInfo, err := relaycommon.GenRelayInfo(c, relayFormat, request, ws)
 	if err != nil {
 		newAPIError = types.NewError(err, types.ErrorCodeGenRelayInfoFailed)
 		return
+	}
+	if isImageBridge {
+		if bridgeIntent.Mode == imagebridge.ModeEdit {
+			relayInfo.RelayMode = relayconstant.RelayModeImagesEdits
+		} else {
+			relayInfo.RelayMode = relayconstant.RelayModeImagesGenerations
+		}
+		relayInfo.RequestURLPath = bridgeIntent.UpstreamPath()
+		relayInfo.IsStream = false
+		c.Set(string(constant.ContextKeyIsStream), bridgeIntent.Stream)
 	}
 
 	needSensitiveCheck := setting.ShouldCheckPromptSensitive()
@@ -201,6 +234,9 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		ModelName:   relayInfo.OriginModelName,
 		RequestPath: c.Request.URL.Path,
 		Retry:       common.GetPointer(0),
+	}
+	if isImageBridge {
+		retryParam.RequestPath = bridgeIntent.UpstreamPath()
 	}
 	relayInfo.RetryIndex = 0
 	relayInfo.LastError = nil

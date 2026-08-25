@@ -82,7 +82,7 @@ func SetRelayRouter(router *gin.Engine) {
 	{
 		//http router
 		httpRouter := relayV1Router.Group("")
-		httpRouter.Use(middleware.Distribute())
+		httpRouter.Use(middleware.DetectImageBridge(), middleware.Distribute())
 
 		// claude related routes
 		httpRouter.POST("/messages", func(c *gin.Context) {
@@ -156,7 +156,9 @@ func SetRelayRouter(router *gin.Engine) {
 		})
 
 		// not implemented
-		httpRouter.POST("/images/variations", controller.RelayNotImplemented)
+		httpRouter.POST("/images/variations", func(c *gin.Context) {
+			controller.Relay(c, types.RelayFormatOpenAIImage)
+		})
 		httpRouter.GET("/files", controller.RelayNotImplemented)
 		httpRouter.POST("/files", controller.RelayNotImplemented)
 		httpRouter.DELETE("/files/:id", controller.RelayNotImplemented)
