@@ -1,23 +1,26 @@
 package common
 
 import (
+	"errors"
 	"sync"
 	"sync/atomic"
 )
 
-// DiskCacheConfig 磁盘缓存配置（由 performance_setting 包更新）
+var ErrDiskCacheCapacityExhausted = errors.New("disk cache capacity exhausted")
+
+// DiskCacheConfig is updated by the performance settings package.
 type DiskCacheConfig struct {
-	// Enabled 是否启用磁盘缓存
+	// Enabled controls disk-backed request storage.
 	Enabled bool
-	// ThresholdMB 触发磁盘缓存的请求体大小阈值（MB）
+	// ThresholdMB is the request size that starts disk storage.
 	ThresholdMB int
-	// MaxSizeMB 磁盘缓存最大总大小（MB）
+	// MaxSizeMB is the aggregate disk-storage budget.
 	MaxSizeMB int
-	// Path 磁盘缓存目录
+	// Path is the disk-storage directory.
 	Path string
 }
 
-// 全局磁盘缓存配置
+// Global disk-cache configuration.
 var diskCacheConfig = DiskCacheConfig{
 	Enabled:     false,
 	ThresholdMB: 10,
@@ -26,71 +29,71 @@ var diskCacheConfig = DiskCacheConfig{
 }
 var diskCacheConfigMu sync.RWMutex
 
-// GetDiskCacheConfig 获取磁盘缓存配置
+// GetDiskCacheConfig returns the current disk-cache configuration.
 func GetDiskCacheConfig() DiskCacheConfig {
 	diskCacheConfigMu.RLock()
 	defer diskCacheConfigMu.RUnlock()
 	return diskCacheConfig
 }
 
-// SetDiskCacheConfig 设置磁盘缓存配置
+// SetDiskCacheConfig replaces the disk-cache configuration.
 func SetDiskCacheConfig(config DiskCacheConfig) {
 	diskCacheConfigMu.Lock()
 	defer diskCacheConfigMu.Unlock()
 	diskCacheConfig = config
 }
 
-// IsDiskCacheEnabled 是否启用磁盘缓存
+// IsDiskCacheEnabled reports whether disk-backed request storage is enabled.
 func IsDiskCacheEnabled() bool {
 	diskCacheConfigMu.RLock()
 	defer diskCacheConfigMu.RUnlock()
 	return diskCacheConfig.Enabled
 }
 
-// GetDiskCacheThresholdBytes 获取磁盘缓存阈值（字节）
+// GetDiskCacheThresholdBytes returns the spill threshold in bytes.
 func GetDiskCacheThresholdBytes() int64 {
 	diskCacheConfigMu.RLock()
 	defer diskCacheConfigMu.RUnlock()
 	return int64(diskCacheConfig.ThresholdMB) << 20
 }
 
-// GetDiskCacheMaxSizeBytes 获取磁盘缓存最大大小（字节）
+// GetDiskCacheMaxSizeBytes returns the disk budget in bytes.
 func GetDiskCacheMaxSizeBytes() int64 {
 	diskCacheConfigMu.RLock()
 	defer diskCacheConfigMu.RUnlock()
 	return int64(diskCacheConfig.MaxSizeMB) << 20
 }
 
-// GetDiskCachePath 获取磁盘缓存目录
+// GetDiskCachePath returns the configured cache directory.
 func GetDiskCachePath() string {
 	diskCacheConfigMu.RLock()
 	defer diskCacheConfigMu.RUnlock()
 	return diskCacheConfig.Path
 }
 
-// DiskCacheStats 磁盘缓存统计信息
+// DiskCacheStats is a read-only request-storage snapshot.
 type DiskCacheStats struct {
-	// 当前活跃的磁盘缓存文件数
+	// ActiveDiskFiles counts live owned disk files.
 	ActiveDiskFiles int64 `json:"active_disk_files"`
-	// 当前磁盘缓存总大小（字节）
+	// CurrentDiskUsageBytes counts reserved disk bytes.
 	CurrentDiskUsageBytes int64 `json:"current_disk_usage_bytes"`
-	// 当前内存缓存数量
+	// ActiveMemoryBuffers counts live in-memory bodies.
 	ActiveMemoryBuffers int64 `json:"active_memory_buffers"`
-	// 当前内存缓存总大小（字节）
+	// CurrentMemoryUsageBytes counts live in-memory body bytes.
 	CurrentMemoryUsageBytes int64 `json:"current_memory_usage_bytes"`
-	// 磁盘缓存命中次数
+	// DiskCacheHits counts disk-storage decisions.
 	DiskCacheHits int64 `json:"disk_cache_hits"`
-	// 内存缓存命中次数
+	// MemoryCacheHits counts memory-storage decisions.
 	MemoryCacheHits int64 `json:"memory_cache_hits"`
-	// 磁盘缓存最大限制（字节）
+	// MaxDiskCacheBytes is the configured disk budget.
 	DiskCacheMaxBytes int64 `json:"disk_cache_max_bytes"`
-	// 磁盘缓存阈值（字节）
+	// ThresholdBytes is the spill threshold.
 	DiskCacheThresholdBytes int64 `json:"disk_cache_threshold_bytes"`
 }
 
 var diskCacheStats DiskCacheStats
 
-// GetDiskCacheStats 获取缓存统计信息
+// GetDiskCacheStats returns a request-storage snapshot.
 func GetDiskCacheStats() DiskCacheStats {
 	stats := DiskCacheStats{
 		ActiveDiskFiles:         atomic.LoadInt64(&diskCacheStats.ActiveDiskFiles),
@@ -105,58 +108,111 @@ func GetDiskCacheStats() DiskCacheStats {
 	return stats
 }
 
-// IncrementDiskFiles 增加磁盘文件计数
+// IncrementDiskFiles records a newly owned disk file.
 func IncrementDiskFiles(size int64) {
-	atomic.AddInt64(&diskCacheStats.ActiveDiskFiles, 1)
+	incrementDiskFileCount()
 	atomic.AddInt64(&diskCacheStats.CurrentDiskUsageBytes, size)
 }
 
-// DecrementDiskFiles 减少磁盘文件计数
+// DecrementDiskFiles releases an owned disk file.
 func DecrementDiskFiles(size int64) {
-	if atomic.AddInt64(&diskCacheStats.ActiveDiskFiles, -1) < 0 {
-		atomic.StoreInt64(&diskCacheStats.ActiveDiskFiles, 0)
+	decrementDiskFileCount()
+	releaseDiskCacheBytes(size)
+}
+
+func incrementDiskFileCount() {
+	atomic.AddInt64(&diskCacheStats.ActiveDiskFiles, 1)
+}
+
+func decrementDiskFileCount() {
+	decrementInt64NonNegative(&diskCacheStats.ActiveDiskFiles, 1)
+}
+
+// reserveDiskCacheBytes atomically admits bytes into the shared disk budget.
+// The usage counter includes both completed files and bytes reserved by a
+// body that is currently being streamed, closing the check-then-write race
+// between concurrent large requests.
+func reserveDiskCacheBytes(size int64) error {
+	if size <= 0 {
+		return nil
 	}
-	if atomic.AddInt64(&diskCacheStats.CurrentDiskUsageBytes, -size) < 0 {
-		atomic.StoreInt64(&diskCacheStats.CurrentDiskUsageBytes, 0)
+	config := GetDiskCacheConfig()
+	if !config.Enabled {
+		return ErrDiskCacheCapacityExhausted
+	}
+	maxBytes := int64(config.MaxSizeMB) << 20
+	if maxBytes <= 0 || size > maxBytes {
+		return ErrDiskCacheCapacityExhausted
+	}
+	for {
+		current := atomic.LoadInt64(&diskCacheStats.CurrentDiskUsageBytes)
+		if current < 0 {
+			current = 0
+		}
+		if current > maxBytes-size {
+			return ErrDiskCacheCapacityExhausted
+		}
+		if atomic.CompareAndSwapInt64(&diskCacheStats.CurrentDiskUsageBytes, current, current+size) {
+			return nil
+		}
 	}
 }
 
-// IncrementMemoryBuffers 增加内存缓存计数
+func releaseDiskCacheBytes(size int64) {
+	if size <= 0 {
+		return
+	}
+	decrementInt64NonNegative(&diskCacheStats.CurrentDiskUsageBytes, size)
+}
+
+func decrementInt64NonNegative(target *int64, delta int64) {
+	for {
+		current := atomic.LoadInt64(target)
+		next := current - delta
+		if next < 0 {
+			next = 0
+		}
+		if atomic.CompareAndSwapInt64(target, current, next) {
+			return
+		}
+	}
+}
+
+// IncrementMemoryBuffers records a newly owned memory body.
 func IncrementMemoryBuffers(size int64) {
 	atomic.AddInt64(&diskCacheStats.ActiveMemoryBuffers, 1)
 	atomic.AddInt64(&diskCacheStats.CurrentMemoryUsageBytes, size)
 }
 
-// DecrementMemoryBuffers 减少内存缓存计数
+// DecrementMemoryBuffers releases an owned memory body.
 func DecrementMemoryBuffers(size int64) {
 	atomic.AddInt64(&diskCacheStats.ActiveMemoryBuffers, -1)
 	atomic.AddInt64(&diskCacheStats.CurrentMemoryUsageBytes, -size)
 }
 
-// IncrementDiskCacheHits 增加磁盘缓存命中次数
+// IncrementDiskCacheHits records a disk-storage decision.
 func IncrementDiskCacheHits() {
 	atomic.AddInt64(&diskCacheStats.DiskCacheHits, 1)
 }
 
-// IncrementMemoryCacheHits 增加内存缓存命中次数
+// IncrementMemoryCacheHits records a memory-storage decision.
 func IncrementMemoryCacheHits() {
 	atomic.AddInt64(&diskCacheStats.MemoryCacheHits, 1)
 }
 
-// ResetDiskCacheStats 重置命中统计信息（不重置当前使用量）
+// ResetDiskCacheStats resets decision counters without changing active usage.
 func ResetDiskCacheStats() {
 	atomic.StoreInt64(&diskCacheStats.DiskCacheHits, 0)
 	atomic.StoreInt64(&diskCacheStats.MemoryCacheHits, 0)
 }
 
-// ResetDiskCacheUsage 重置磁盘缓存使用量统计（用于清理缓存后）
+// ResetDiskCacheUsage clears active-usage counters after external cleanup.
 func ResetDiskCacheUsage() {
 	atomic.StoreInt64(&diskCacheStats.ActiveDiskFiles, 0)
 	atomic.StoreInt64(&diskCacheStats.CurrentDiskUsageBytes, 0)
 }
 
-// SyncDiskCacheStats 从实际磁盘状态同步统计信息
-// 用于修正统计与实际不符的情况
+// SyncDiskCacheStats reconciles counters with unowned files on disk.
 func SyncDiskCacheStats() {
 	fileCount, totalSize, err := GetDiskCacheInfo()
 	if err != nil {
@@ -166,12 +222,12 @@ func SyncDiskCacheStats() {
 	atomic.StoreInt64(&diskCacheStats.CurrentDiskUsageBytes, totalSize)
 }
 
-// IsDiskCacheAvailable 检查是否可以创建新的磁盘缓存
+// IsDiskCacheAvailable reports whether the requested bytes fit the disk budget.
 func IsDiskCacheAvailable(requestSize int64) bool {
 	if !IsDiskCacheEnabled() {
 		return false
 	}
 	maxBytes := GetDiskCacheMaxSizeBytes()
 	currentUsage := atomic.LoadInt64(&diskCacheStats.CurrentDiskUsageBytes)
-	return currentUsage+requestSize <= maxBytes
+	return requestSize >= 0 && requestSize <= maxBytes && currentUsage <= maxBytes-requestSize
 }

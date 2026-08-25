@@ -1,13 +1,121 @@
 package common
 
 import (
+	"bytes"
+	"errors"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
+	"runtime"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+var errDiskSpillStartedTooLate = errors.New("disk spill did not start near the memory threshold")
+
+type spillDeadlineReader struct {
+	remaining  int64
+	read       int64
+	spillLimit int64
+	cacheDir   string
+}
+
+func (r *spillDeadlineReader) Read(p []byte) (int, error) {
+	if r.remaining == 0 {
+		return 0, io.EOF
+	}
+	if r.read > r.spillLimit {
+		entries, err := os.ReadDir(r.cacheDir)
+		if err != nil && !os.IsNotExist(err) {
+			return 0, err
+		}
+		spillStarted := false
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				spillStarted = true
+				break
+			}
+		}
+		if !spillStarted {
+			return 0, errDiskSpillStartedTooLate
+		}
+	}
+
+	n := len(p)
+	if int64(n) > r.remaining {
+		n = int(r.remaining)
+	}
+	clear(p[:n])
+	r.remaining -= int64(n)
+	r.read += int64(n)
+	return n, nil
+}
+
+type fixedSizeZeroReader struct {
+	remaining int64
+}
+
+type failingAfterReader struct {
+	remaining int64
+	err       error
+}
+
+func (r *failingAfterReader) Read(p []byte) (int, error) {
+	if r.remaining == 0 {
+		return 0, r.err
+	}
+	n := len(p)
+	if int64(n) > r.remaining {
+		n = int(r.remaining)
+	}
+	clear(p[:n])
+	r.remaining -= int64(n)
+	return n, nil
+}
+
+type readCountingReader struct {
+	readCalls int
+}
+
+func (r *readCountingReader) Read(_ []byte) (int, error) {
+	r.readCalls++
+	return 0, errors.New("unexpected read")
+}
+
+func (r *fixedSizeZeroReader) Read(p []byte) (int, error) {
+	if r.remaining == 0 {
+		return 0, io.EOF
+	}
+	n := len(p)
+	if int64(n) > r.remaining {
+		n = int(r.remaining)
+	}
+	clear(p[:n])
+	r.remaining -= int64(n)
+	return n, nil
+}
+
+func configureBodyStorageDiskCache(tb testing.TB, thresholdMB, maxSizeMB int) string {
+	tb.Helper()
+	previous := GetDiskCacheConfig()
+	cacheRoot := tb.TempDir()
+	SetDiskCacheConfig(DiskCacheConfig{
+		Enabled:     true,
+		ThresholdMB: thresholdMB,
+		MaxSizeMB:   maxSizeMB,
+		Path:        cacheRoot,
+	})
+	tb.Cleanup(func() {
+		SetDiskCacheConfig(previous)
+	})
+	return filepath.Join(cacheRoot, diskCacheDir)
+}
 
 func TestNewReplayableBodyReaderKeepsStorageLifecycleWithCaller(t *testing.T) {
 	payload := []byte(`{"model":"test-model","input":"hello"}`)
@@ -34,4 +142,325 @@ func TestNewReplayableBodyReaderKeepsStorageLifecycleWithCaller(t *testing.T) {
 	require.NoError(t, storage.Close())
 	_, err = body.NewReader()
 	require.ErrorIs(t, err, ErrStorageClosed)
+}
+
+func TestCreateBodyStorageFromUnknownLengthSpillsWhileReading(t *testing.T) {
+	const (
+		thresholdBytes = int64(1 << 20)
+		bodyBytes      = int64(8 << 20)
+	)
+	cacheDir := configureBodyStorageDiskCache(t, 1, 64)
+	reader := &spillDeadlineReader{
+		remaining:  bodyBytes,
+		spillLimit: thresholdBytes + 64<<10,
+		cacheDir:   cacheDir,
+	}
+
+	storage, err := CreateBodyStorageFromReader(reader, -1, 16<<20)
+	require.NoError(t, err)
+	defer storage.Close()
+	require.True(t, storage.IsDisk())
+	require.EqualValues(t, bodyBytes, storage.Size())
+}
+
+func TestCreateBodyStorageFromUnknownLengthSpillPreservesBodyAndReleasesFile(t *testing.T) {
+	cacheDir := configureBodyStorageDiskCache(t, 1, 64)
+	payload := bytes.Repeat([]byte("native-spool-payload\n"), 128*1024)
+	statsBefore := GetDiskCacheStats()
+
+	storage, err := CreateBodyStorageFromReader(bytes.NewReader(payload), -1, 8<<20)
+	require.NoError(t, err)
+	require.True(t, storage.IsDisk())
+	require.EqualValues(t, len(payload), storage.Size())
+
+	replay, err := storage.NewReader()
+	require.NoError(t, err)
+	actual, err := io.ReadAll(replay)
+	require.NoError(t, err)
+	require.NoError(t, replay.Close())
+	require.Equal(t, payload, actual)
+
+	statsActive := GetDiskCacheStats()
+	require.Equal(t, statsBefore.ActiveDiskFiles+1, statsActive.ActiveDiskFiles)
+	require.Equal(t, statsBefore.CurrentDiskUsageBytes+int64(len(payload)), statsActive.CurrentDiskUsageBytes)
+	require.NoError(t, storage.Close())
+
+	statsAfter := GetDiskCacheStats()
+	require.Equal(t, statsBefore.ActiveDiskFiles, statsAfter.ActiveDiskFiles)
+	require.Equal(t, statsBefore.CurrentDiskUsageBytes, statsAfter.CurrentDiskUsageBytes)
+	entries, err := os.ReadDir(cacheDir)
+	require.NoError(t, err)
+	require.Empty(t, entries)
+}
+
+func TestCreateBodyStorageFromUnknownLengthRemovesPartialSpillOnFailure(t *testing.T) {
+	cacheDir := configureBodyStorageDiskCache(t, 1, 64)
+	readErr := errors.New("source read failed")
+	statsBefore := GetDiskCacheStats()
+
+	storage, err := CreateBodyStorageFromReader(&failingAfterReader{remaining: 2 << 20, err: readErr}, -1, 8<<20)
+	require.Nil(t, storage)
+	require.ErrorIs(t, err, readErr)
+
+	statsAfter := GetDiskCacheStats()
+	require.Equal(t, statsBefore.ActiveDiskFiles, statsAfter.ActiveDiskFiles)
+	require.Equal(t, statsBefore.CurrentDiskUsageBytes, statsAfter.CurrentDiskUsageBytes)
+	entries, readDirErr := os.ReadDir(cacheDir)
+	require.NoError(t, readDirErr)
+	require.Empty(t, entries)
+}
+
+func TestCreateBodyStorageFromUnknownLengthRemovesOversizedPartialSpill(t *testing.T) {
+	cacheDir := configureBodyStorageDiskCache(t, 1, 64)
+	statsBefore := GetDiskCacheStats()
+
+	storage, err := CreateBodyStorageFromReader(&fixedSizeZeroReader{remaining: 4 << 20}, -1, 2<<20)
+	require.Nil(t, storage)
+	require.ErrorIs(t, err, ErrRequestBodyTooLarge)
+
+	statsAfter := GetDiskCacheStats()
+	require.Equal(t, statsBefore.ActiveDiskFiles, statsAfter.ActiveDiskFiles)
+	require.Equal(t, statsBefore.CurrentDiskUsageBytes, statsAfter.CurrentDiskUsageBytes)
+	entries, readDirErr := os.ReadDir(cacheDir)
+	require.NoError(t, readDirErr)
+	require.Empty(t, entries)
+}
+
+func TestCreateBodyStorageFromUnknownLengthKeepsMemoryFallbackWhenDiskCacheIsDisabled(t *testing.T) {
+	previous := GetDiskCacheConfig()
+	SetDiskCacheConfig(DiskCacheConfig{
+		Enabled:     false,
+		ThresholdMB: 1,
+		MaxSizeMB:   0,
+		Path:        t.TempDir(),
+	})
+	t.Cleanup(func() {
+		SetDiskCacheConfig(previous)
+	})
+	payload := bytes.Repeat([]byte("memory-fallback"), 160*1024)
+
+	storage, err := CreateBodyStorageFromReader(bytes.NewReader(payload), -1, 8<<20)
+	require.NoError(t, err)
+	defer storage.Close()
+	require.False(t, storage.IsDisk())
+	actual, err := storage.Bytes()
+	require.NoError(t, err)
+	require.Equal(t, payload, actual)
+}
+
+func TestCreateBodyStorageRejectsKnownLargeBodyWhenDiskBudgetIsExhaustedBeforeReading(t *testing.T) {
+	configureBodyStorageDiskCache(t, 1, 2)
+	firstPayload := bytes.Repeat([]byte("a"), 2<<20)
+	first, err := CreateBodyStorageFromReader(bytes.NewReader(firstPayload), int64(len(firstPayload)), 4<<20)
+	require.NoError(t, err)
+	require.True(t, first.IsDisk())
+	defer first.Close()
+
+	reader := &readCountingReader{}
+	second, err := CreateBodyStorageFromReader(reader, 2<<20, 4<<20)
+	require.Nil(t, second)
+	require.ErrorIs(t, err, ErrDiskCacheCapacityExhausted)
+	require.Zero(t, reader.readCalls, "an over-budget known body must be rejected before it is buffered")
+}
+
+func TestCreateBodyStorageReleasesPartialUnknownBodyReservationWhenBudgetFills(t *testing.T) {
+	cacheDir := configureBodyStorageDiskCache(t, 1, 2)
+	statsBefore := GetDiskCacheStats()
+
+	storage, err := CreateBodyStorageFromReader(
+		&fixedSizeZeroReader{remaining: 4 << 20},
+		-1,
+		8<<20,
+	)
+
+	require.Nil(t, storage)
+	require.ErrorIs(t, err, ErrDiskCacheCapacityExhausted)
+	statsAfter := GetDiskCacheStats()
+	require.Equal(t, statsBefore.ActiveDiskFiles, statsAfter.ActiveDiskFiles)
+	require.Equal(t, statsBefore.CurrentDiskUsageBytes, statsAfter.CurrentDiskUsageBytes)
+	entries, readDirErr := os.ReadDir(cacheDir)
+	require.NoError(t, readDirErr)
+	require.Empty(t, entries)
+}
+
+func TestCreateBodyStorageTrimsOverstatedKnownLengthReservationToActualBytes(t *testing.T) {
+	configureBodyStorageDiskCache(t, 1, 8)
+	statsBefore := GetDiskCacheStats()
+	const actualBytes = int64(2 << 20)
+
+	storage, err := CreateBodyStorageFromReader(
+		&fixedSizeZeroReader{remaining: actualBytes},
+		4<<20,
+		8<<20,
+	)
+	require.NoError(t, err)
+	require.True(t, storage.IsDisk())
+	require.EqualValues(t, actualBytes, storage.Size())
+	statsActive := GetDiskCacheStats()
+	require.Equal(t, statsBefore.CurrentDiskUsageBytes+actualBytes, statsActive.CurrentDiskUsageBytes)
+	require.NoError(t, storage.Close())
+	statsAfter := GetDiskCacheStats()
+	require.Equal(t, statsBefore.CurrentDiskUsageBytes, statsAfter.CurrentDiskUsageBytes)
+}
+
+func TestCreateBodyStorageSupportsSixteenConcurrentLargeBodiesWithinReservedBudget(t *testing.T) {
+	const (
+		workers   = 16
+		bodyBytes = int64(2 << 20)
+	)
+	configureBodyStorageDiskCache(t, 1, 64)
+	statsBefore := GetDiskCacheStats()
+
+	type result struct {
+		storage BodyStorage
+		err     error
+	}
+	start := make(chan struct{})
+	results := make(chan result, workers)
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			storage, err := CreateBodyStorageFromReader(
+				&fixedSizeZeroReader{remaining: bodyBytes},
+				bodyBytes,
+				4<<20,
+			)
+			results <- result{storage: storage, err: err}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+
+	storages := make([]BodyStorage, 0, workers)
+	for got := range results {
+		require.NoError(t, got.err)
+		require.NotNil(t, got.storage)
+		require.True(t, got.storage.IsDisk())
+		storages = append(storages, got.storage)
+	}
+	require.Len(t, storages, workers)
+
+	statsActive := GetDiskCacheStats()
+	require.Equal(t, statsBefore.ActiveDiskFiles+workers, statsActive.ActiveDiskFiles)
+	require.Equal(t, statsBefore.CurrentDiskUsageBytes+workers*bodyBytes, statsActive.CurrentDiskUsageBytes)
+
+	for _, storage := range storages {
+		require.NoError(t, storage.Close())
+	}
+	statsAfter := GetDiskCacheStats()
+	require.Equal(t, statsBefore.ActiveDiskFiles, statsAfter.ActiveDiskFiles)
+	require.Equal(t, statsBefore.CurrentDiskUsageBytes, statsAfter.CurrentDiskUsageBytes)
+}
+
+func TestSixteenUnknownLargeBodiesKeepHeapBoundedAndReturnToBaseline(t *testing.T) {
+	const (
+		workers   = 16
+		bodyBytes = int64(8 << 20)
+	)
+	configureBodyStorageDiskCache(t, 1, 256)
+	runtime.GC()
+	var before runtime.MemStats
+	runtime.ReadMemStats(&before)
+	var peakHeap atomic.Uint64
+	peakHeap.Store(before.HeapAlloc)
+	stopSampling := make(chan struct{})
+	samplerDone := make(chan struct{})
+	go func() {
+		defer close(samplerDone)
+		ticker := time.NewTicker(500 * time.Microsecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				var current runtime.MemStats
+				runtime.ReadMemStats(&current)
+				for {
+					peak := peakHeap.Load()
+					if current.HeapAlloc <= peak || peakHeap.CompareAndSwap(peak, current.HeapAlloc) {
+						break
+					}
+				}
+			case <-stopSampling:
+				return
+			}
+		}
+	}()
+
+	type result struct {
+		storage BodyStorage
+		err     error
+	}
+	start := make(chan struct{})
+	results := make(chan result, workers)
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			storage, err := CreateBodyStorageFromReader(
+				&fixedSizeZeroReader{remaining: bodyBytes},
+				-1,
+				16<<20,
+			)
+			results <- result{storage: storage, err: err}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+	close(stopSampling)
+	<-samplerDone
+
+	storages := make([]BodyStorage, 0, workers)
+	for got := range results {
+		require.NoError(t, got.err)
+		require.NotNil(t, got.storage)
+		storages = append(storages, got.storage)
+	}
+	peakGrowth := peakHeap.Load() - before.HeapAlloc
+	t.Logf("peak heap growth for sixteen concurrent 8 MiB unknown bodies: %d bytes", peakGrowth)
+	require.Less(t, peakGrowth, uint64(96<<20), "the heap must not retain sixteen complete 8 MiB bodies")
+
+	for _, storage := range storages {
+		require.NoError(t, storage.Close())
+	}
+	runtime.GC()
+	var after runtime.MemStats
+	runtime.ReadMemStats(&after)
+	t.Logf("heap delta after close and GC: %d bytes", int64(after.HeapAlloc)-int64(before.HeapAlloc))
+	require.LessOrEqual(t, after.HeapAlloc, before.HeapAlloc+(16<<20), "heap must return near baseline after all bodies close")
+}
+
+func TestCreateBodyStorageRejectsKnownOversizeBeforeReading(t *testing.T) {
+	reader := &readCountingReader{}
+	storage, err := CreateBodyStorageFromReader(reader, 9<<20, 8<<20)
+	require.Nil(t, storage)
+	require.ErrorIs(t, err, ErrRequestBodyTooLarge)
+	require.Zero(t, reader.readCalls)
+}
+
+func BenchmarkCreateBodyStorageFromUnknownLengthLarge(b *testing.B) {
+	const bodyBytes = int64(16 << 20)
+	configureBodyStorageDiskCache(b, 1, 64)
+	b.ReportAllocs()
+	b.SetBytes(bodyBytes)
+	b.ResetTimer()
+
+	for range b.N {
+		storage, err := CreateBodyStorageFromReader(&fixedSizeZeroReader{remaining: bodyBytes}, -1, 32<<20)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if !storage.IsDisk() {
+			b.Fatal("large unknown-length body did not use disk storage")
+		}
+		if err := storage.Close(); err != nil {
+			b.Fatal(err)
+		}
+	}
 }

@@ -394,10 +394,19 @@ func usageSemanticFromUsage(relayInfo *relaycommon.RelayInfo, usage *dto.Usage) 
 	return "openai"
 }
 
+func missingBillingDisposition(relayInfo *relaycommon.RelayInfo) (string, bool) {
+	if relayInfo != nil && relayInfo.IsStream && relayInfo.StreamStatus != nil &&
+		relayInfo.StreamStatus.EndReason == relaycommon.StreamEndReasonClientGone {
+		return "客户端已断开，请求已取消，未收到最终计费信息", true
+	}
+	return "上游没有返回计费信息，无法扣费（可能是上游超时）", false
+}
+
 func PostTextConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, usage *dto.Usage, extraContent []string) {
 	originUsage := usage
 	billingUsage := effectiveBillingUsage(usage)
-	if usage == nil {
+	missingBillingMessage, clientCanceled := missingBillingDisposition(relayInfo)
+	if usage == nil && !clientCanceled {
 		extraContent = append(extraContent, "上游无计费信息")
 	}
 	if originUsage != nil {
@@ -441,8 +450,12 @@ func PostTextConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, us
 	}
 
 	if !summary.hasBillableUsage() {
-		extraContent = append(extraContent, "上游没有返回计费信息，无法扣费（可能是上游超时）")
-		logger.LogError(ctx, fmt.Sprintf("total tokens is 0, cannot consume quota, userId %d, channelId %d, tokenId %d, model %s， pre-consumed quota %d", relayInfo.UserId, relayInfo.ChannelId, relayInfo.TokenId, summary.ModelName, relayInfo.FinalPreConsumedQuota))
+		extraContent = append(extraContent, missingBillingMessage)
+		if clientCanceled {
+			logger.LogInfo(ctx, fmt.Sprintf("client disconnected before final billing usage, userId %d, channelId %d, tokenId %d, model %s, stream %s, received %d, pre-consumed quota %d", relayInfo.UserId, relayInfo.ChannelId, relayInfo.TokenId, summary.ModelName, relayInfo.StreamStatus.Summary(), relayInfo.ReceivedResponseCount, relayInfo.FinalPreConsumedQuota))
+		} else {
+			logger.LogError(ctx, fmt.Sprintf("total tokens is 0, cannot consume quota, userId %d, channelId %d, tokenId %d, model %s， pre-consumed quota %d", relayInfo.UserId, relayInfo.ChannelId, relayInfo.TokenId, summary.ModelName, relayInfo.FinalPreConsumedQuota))
+		}
 	} else {
 		model.UpdateUserUsedQuotaAndRequestCount(relayInfo.UserId, summary.Quota)
 		model.UpdateChannelUsedQuota(relayInfo.ChannelId, summary.Quota)

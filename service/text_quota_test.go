@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"math"
 	"net/http/httptest"
 	"testing"
@@ -21,6 +22,30 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestMissingBillingDispositionPreservesClientCancellation(t *testing.T) {
+	clientGone := &relaycommon.RelayInfo{
+		IsStream: true,
+		StreamStatus: &relaycommon.StreamStatus{
+			EndReason: relaycommon.StreamEndReasonClientGone,
+			EndError:  context.Canceled,
+		},
+	}
+	message, canceled := missingBillingDisposition(clientGone)
+	assert.True(t, canceled)
+	assert.Contains(t, message, "客户端已断开")
+	assert.NotContains(t, message, "上游超时")
+
+	upstreamMissing := &relaycommon.RelayInfo{
+		IsStream: true,
+		StreamStatus: &relaycommon.StreamStatus{
+			EndReason: relaycommon.StreamEndReasonScannerErr,
+		},
+	}
+	message, canceled = missingBillingDisposition(upstreamMissing)
+	assert.False(t, canceled)
+	assert.Contains(t, message, "上游没有返回计费信息")
+}
 
 func TestCalculateTextQuotaSummaryUnifiedForClaudeSemantic(t *testing.T) {
 	gin.SetMode(gin.TestMode)

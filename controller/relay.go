@@ -68,6 +68,21 @@ func geminiRelayHandler(c *gin.Context, info *relaycommon.RelayInfo) *types.NewA
 	return err
 }
 
+func requestBodyStorageErrorStatus(c *gin.Context, err error) (int, bool) {
+	if common.IsRequestBodyTooLargeError(err) || errors.Is(err, common.ErrRequestBodyTooLarge) {
+		return http.StatusRequestEntityTooLarge, true
+	}
+	if errors.Is(err, common.ErrDiskCacheCapacityExhausted) {
+		c.Header("Retry-After", "5")
+		return http.StatusServiceUnavailable, true
+	}
+	if errors.Is(err, common.ErrLargeBodyAdmissionTimeout) {
+		c.Header("Retry-After", "5")
+		return http.StatusServiceUnavailable, true
+	}
+	return 0, false
+}
+
 func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 
 	requestId := c.GetString(common.RequestIdKey)
@@ -111,9 +126,8 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 
 	request, err := helper.GetAndValidateRequest(c, relayFormat)
 	if err != nil {
-		// Map "request body too large" to 413 so clients can handle it correctly
-		if common.IsRequestBodyTooLargeError(err) || errors.Is(err, common.ErrRequestBodyTooLarge) {
-			newAPIError = types.NewErrorWithStatusCode(err, types.ErrorCodeReadRequestBodyFailed, http.StatusRequestEntityTooLarge, types.ErrOptionWithSkipRetry())
+		if status, handled := requestBodyStorageErrorStatus(c, err); handled {
+			newAPIError = types.NewErrorWithStatusCode(err, types.ErrorCodeReadRequestBodyFailed, status, types.ErrOptionWithSkipRetry())
 		} else {
 			newAPIError = types.NewError(err, types.ErrorCodeInvalidRequest)
 		}
@@ -207,12 +221,11 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 
 		bodyStorage, bodyErr := common.GetBodyStorage(c)
 		if bodyErr != nil {
-			// Ensure consistent 413 for oversized bodies even when error occurs later (e.g., retry path)
-			if common.IsRequestBodyTooLargeError(bodyErr) || errors.Is(bodyErr, common.ErrRequestBodyTooLarge) {
-				newAPIError = types.NewErrorWithStatusCode(bodyErr, types.ErrorCodeReadRequestBodyFailed, http.StatusRequestEntityTooLarge, types.ErrOptionWithSkipRetry())
-			} else {
-				newAPIError = types.NewErrorWithStatusCode(bodyErr, types.ErrorCodeReadRequestBodyFailed, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
+			status := http.StatusBadRequest
+			if mapped, handled := requestBodyStorageErrorStatus(c, bodyErr); handled {
+				status = mapped
 			}
+			newAPIError = types.NewErrorWithStatusCode(bodyErr, types.ErrorCodeReadRequestBodyFailed, status, types.ErrOptionWithSkipRetry())
 			break
 		}
 		c.Request.Body = io.NopCloser(bodyStorage)
@@ -256,9 +269,9 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 }
 
 var upgrader = websocket.Upgrader{
-	Subprotocols: []string{"realtime"}, // WS 握手支持的协议，如果有使用 Sec-WebSocket-Protocol，则必须在此声明对应的 Protocol TODO add other protocol
+	Subprotocols: []string{"realtime"}, // Declare every supported Sec-WebSocket-Protocol value here.
 	CheckOrigin: func(r *http.Request) bool {
-		return true // 允许跨域
+		return true // Allow the established cross-origin relay behavior.
 	},
 }
 
@@ -362,7 +375,8 @@ func shouldRetry(c *gin.Context, openaiErr *types.NewAPIError, retryTimes int) b
 
 func processChannelError(c *gin.Context, channelError types.ChannelError, err *types.NewAPIError) {
 	logger.LogError(c, fmt.Sprintf("channel error (channel #%d, status code: %d): %s", channelError.ChannelId, err.StatusCode, common.LocalLogPreview(err.Error())))
-	// 不要使用context获取渠道信息，异步处理时可能会出现渠道信息不一致的情况
+	// Do not read channel data from the request context in asynchronous work;
+	// the selected channel can otherwise become inconsistent.
 	// do not use context to get channel info, there may be inconsistent channel info when processing asynchronously
 	if service.ShouldDisableChannel(err) && channelError.AutoBan {
 		gopool.Go(func() {
@@ -371,7 +385,7 @@ func processChannelError(c *gin.Context, channelError types.ChannelError, err *t
 	}
 
 	if constant.ErrorLogEnabled && types.IsRecordErrorLog(err) {
-		// 保存错误日志到mysql中
+		// Persist the task error log through the configured database backend.
 		userId := c.GetInt("id")
 		tokenName := c.GetString("token_name")
 		modelName := c.GetString("original_model")
@@ -545,11 +559,11 @@ func RelayTask(c *gin.Context) {
 		addUsedChannel(c, channel.Id)
 		bodyStorage, bodyErr := common.GetBodyStorage(c)
 		if bodyErr != nil {
-			if common.IsRequestBodyTooLargeError(bodyErr) || errors.Is(bodyErr, common.ErrRequestBodyTooLarge) {
-				taskErr = service.TaskErrorWrapperLocal(bodyErr, "read_request_body_failed", http.StatusRequestEntityTooLarge)
-			} else {
-				taskErr = service.TaskErrorWrapperLocal(bodyErr, "read_request_body_failed", http.StatusBadRequest)
+			status := http.StatusBadRequest
+			if mapped, handled := requestBodyStorageErrorStatus(c, bodyErr); handled {
+				status = mapped
 			}
+			taskErr = service.TaskErrorWrapperLocal(bodyErr, "read_request_body_failed", status)
 			break
 		}
 		c.Request.Body = io.NopCloser(bodyStorage)
@@ -577,7 +591,7 @@ func RelayTask(c *gin.Context) {
 		logger.LogInfo(c, retryLogStr)
 	}
 
-	// ── 成功：结算 + 日志 + 插入任务 ──
+	// Settle, log, and persist a successful task submission.
 	if taskErr == nil {
 		if settleErr := service.SettleBilling(c, relayInfo, result.Quota); settleErr != nil {
 			common.SysError("settle task billing error: " + settleErr.Error())
@@ -611,7 +625,8 @@ func RelayTask(c *gin.Context) {
 	}
 }
 
-// respondTaskError 统一输出 Task 错误响应（含 429 限流提示改写）
+// respondTaskError writes the normalized task error response, including the
+// existing 429 message adjustment.
 func respondTaskError(c *gin.Context, taskErr *taskdto.TaskError) {
 	if taskErr.StatusCode == http.StatusTooManyRequests {
 		taskErr.Message = "当前分组上游负载已饱和，请稍后再试"
@@ -639,7 +654,7 @@ func shouldRetryTaskRelay(c *gin.Context, channelId int, taskErr *taskdto.TaskEr
 		return true
 	}
 	if taskErr.StatusCode/100 == 5 {
-		// 超时不重试
+		// Do not retry a timed-out task request.
 		if operation_setting.IsAlwaysSkipRetryStatusCode(taskErr.StatusCode) {
 			return false
 		}
@@ -649,7 +664,7 @@ func shouldRetryTaskRelay(c *gin.Context, channelId int, taskErr *taskdto.TaskEr
 		return false
 	}
 	if taskErr.StatusCode == 408 {
-		// azure处理超时不重试
+		// Do not retry Azure processing timeouts.
 		return false
 	}
 	if taskErr.LocalError {

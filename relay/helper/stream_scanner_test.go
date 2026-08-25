@@ -283,6 +283,59 @@ func TestStreamScannerHandler_ClientCancelAbortsUpstreamAndReturns(t *testing.T)
 	assert.NotContains(t, body, "second")
 }
 
+type immediateReadErrorBody struct {
+	err error
+}
+
+func (b *immediateReadErrorBody) Read(_ []byte) (int, error) {
+	return 0, b.err
+}
+
+func (b *immediateReadErrorBody) Close() error {
+	return nil
+}
+
+// A context-aware upstream body can report context.Canceled at the same time
+// the downstream request context closes. The scanner goroutine and the main
+// context watcher race in that case, but the observable reason must always be
+// client_gone rather than a fabricated upstream scanner failure.
+func TestStreamScannerHandler_CanceledBodyIsAlwaysClientGone(t *testing.T) {
+	for i := 0; i < 200; i++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		recorder := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(recorder)
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil).WithContext(ctx)
+		resp := &http.Response{Body: &immediateReadErrorBody{err: context.Canceled}}
+		info := &relaycommon.RelayInfo{
+			DisablePing: true,
+			ChannelMeta: &relaycommon.ChannelMeta{},
+		}
+
+		StreamScannerHandler(c, resp, info, func(data string, sr *StreamResult) {})
+
+		require.NotNil(t, info.StreamStatus)
+		assert.Equal(t, relaycommon.StreamEndReasonClientGone, info.StreamStatus.EndReason, "iteration %d", i)
+	}
+}
+
+func TestClassifyStreamScannerEndReasonUsesDownstreamContext(t *testing.T) {
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	assert.Equal(
+		t,
+		relaycommon.StreamEndReasonClientGone,
+		classifyStreamScannerEndReason(canceled, context.Canceled),
+	)
+	assert.Equal(
+		t,
+		relaycommon.StreamEndReasonScannerErr,
+		classifyStreamScannerEndReason(context.Background(), context.Canceled),
+	)
+}
+
 // ---------- Ping tests ----------
 
 func TestStreamScannerHandler_PingSentDuringSlowUpstream(t *testing.T) {

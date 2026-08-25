@@ -20,6 +20,8 @@ import (
 type PerformanceStats struct {
 	// 缓存统计
 	CacheStats common.DiskCacheStats `json:"cache_stats"`
+	// 大请求入口统计
+	LargeBodyAdmission common.LargeBodyAdmissionStats `json:"large_body_admission"`
 	// 系统内存统计
 	MemoryStats MemoryStats `json:"memory_stats"`
 	// 磁盘缓存目录信息
@@ -120,7 +122,8 @@ func GetPerformanceStats(c *gin.Context) {
 	diskSpaceInfo = common.GetDiskSpaceInfo()
 
 	stats := PerformanceStats{
-		CacheStats: cacheStats,
+		CacheStats:         cacheStats,
+		LargeBodyAdmission: common.GetLargeBodyAdmissionStats(),
 		MemoryStats: MemoryStats{
 			Alloc:        memStats.Alloc,
 			TotalAlloc:   memStats.TotalAlloc,
