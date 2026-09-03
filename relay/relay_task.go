@@ -164,6 +164,14 @@ func RelayTaskSubmit(c *gin.Context, info *relaycommon.RelayInfo) (*TaskSubmitRe
 	if modelName == "" {
 		modelName = service.CoverTaskActionToModelName(platform, info.Action)
 	}
+	if info.UserId > 0 {
+		if err := service.CheckSubscriptionModelAccess(c, info.UserId, modelName, true); err != nil {
+			if errors.Is(err, model.ErrSubscriptionModelNotAllowed) {
+				return nil, service.TaskErrorWrapperLocal(err, "subscription_model_forbidden", http.StatusForbidden)
+			}
+			return nil, service.TaskErrorWrapper(err, "subscription_scope_check_failed", http.StatusServiceUnavailable)
+		}
+	}
 
 	// 2.5 应用渠道的模型映射（与同步任务对齐）
 	info.OriginModelName = modelName
@@ -171,7 +179,6 @@ func RelayTaskSubmit(c *gin.Context, info *relaycommon.RelayInfo) (*TaskSubmitRe
 	if err := helper.ModelMappedHelper(c, info, nil); err != nil {
 		return nil, service.TaskErrorWrapperLocal(err, "model_mapping_failed", http.StatusBadRequest)
 	}
-
 	// 3. 预生成公开 task ID（仅首次）
 	if info.PublicTaskID == "" {
 		info.PublicTaskID = model.GenerateTaskID()

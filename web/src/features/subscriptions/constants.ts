@@ -16,7 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { type TFunction } from 'i18next'
+import type { TFunction } from 'i18next'
 
 // ============================================================================
 // Duration Unit Options
@@ -38,10 +38,22 @@ export const RESET_PERIODS = [
   { value: 'custom', labelKey: 'Custom (seconds)' },
 ] as const
 
+export const SUBSCRIPTION_TYPES = [
+  { value: 'gptopenaicodex', labelKey: 'GPT / OpenAI / Codex only' },
+  { value: 'grok', labelKey: 'Grok only' },
+] as const
+
 export function getDurationUnitOptions(t: TFunction) {
   return DURATION_UNITS.map((u) => ({ value: u.value, label: t(u.labelKey) }))
 }
 
 export function getResetPeriodOptions(t: TFunction) {
   return RESET_PERIODS.map((p) => ({ value: p.value, label: t(p.labelKey) }))
+}
+
+export function getSubscriptionTypeOptions(t: TFunction) {
+  return SUBSCRIPTION_TYPES.map((p) => ({
+    value: p.value,
+    label: t(p.labelKey),
+  }))
 }

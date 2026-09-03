@@ -3,6 +3,7 @@ package types
 import (
 	"fmt"
 	"image"
+	"io"
 	"os"
 	"strings"
 	"sync"
@@ -194,6 +195,19 @@ func (c *CachedFileData) GetBase64Data() (string, error) {
 		return "", fmt.Errorf("failed to read from disk cache: %w", err)
 	}
 	return string(data), nil
+}
+
+// OpenBase64Reader avoids materializing disk-backed base64 data in heap.
+func (c *CachedFileData) OpenBase64Reader() (io.ReadCloser, error) {
+	if !c.isDisk {
+		return io.NopCloser(strings.NewReader(c.base64Data)), nil
+	}
+	c.diskMu.Lock()
+	defer c.diskMu.Unlock()
+	if c.diskClosed {
+		return nil, fmt.Errorf("disk cache already closed")
+	}
+	return os.Open(c.diskPath)
 }
 
 func (c *CachedFileData) SetBase64Data(data string) {

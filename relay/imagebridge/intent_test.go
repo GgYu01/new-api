@@ -52,7 +52,50 @@ func TestDetectJSONExplicitForeignImageModelRemainsEligibleForPublicImageRoute(t
 	require.NoError(t, err)
 	require.True(t, ok)
 	assert.Equal(t, "grok-imagine-image", intent.ClientModel)
-	assert.Equal(t, DefaultModel, intent.Request.Model)
+	assert.Equal(t, "grok-imagine-image", intent.Request.Model)
+}
+
+func TestDetectJSONExplicitForeignImageModelKeepsChannelSelectionModel(t *testing.T) {
+	for _, model := range []string{
+		"grok-imagine-image",
+		"grok-imagine-image-quality",
+		"grok-imagine-image-2.0",
+	} {
+		t.Run(model, func(t *testing.T) {
+			body := []byte(`{"model":"` + model + `","prompt":"a lighthouse"}`)
+
+			intent, ok, err := DetectJSON("/v1/images/generations", body)
+
+			require.NoError(t, err)
+			require.True(t, ok)
+			assert.Equal(t, model, intent.ClientModel)
+			assert.Equal(t, model, intent.Request.Model)
+		})
+	}
+}
+
+func TestDetectJSONForeignGrokImageToolKeepsChannelSelectionModel(t *testing.T) {
+	body := []byte(`{"model":"grok-4.6","input":"draw a lighthouse","tools":[{"type":"image_generation"}]}`)
+
+	intent, ok, err := DetectJSON("/v1/responses", body)
+
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, "grok-4.6", intent.ClientModel)
+	assert.Equal(t, "grok-4.6", intent.Request.Model)
+}
+
+func TestKnownGrokModelsAreNeverClassifiedAsOpenAIFamily(t *testing.T) {
+	for _, model := range []string{
+		"grok-3-mini", "grok-3-mini-fast", "grok-4.20-0309-non-reasoning",
+		"grok-4.20-0309-reasoning", "grok-4.20-multi-agent-0309", "grok-4.3",
+		"grok-4.5", "grok-4.6", "grok-build-0.1", "grok-code-fast",
+		"grok-code-fast-1", "grok-code-fast-1-0825", "grok-composer-2.5-fast",
+		"grok-imagine-image", "grok-imagine-image-2.0", "grok-imagine-image-quality",
+		"grok-imagine-video", "grok-imagine-video-1.5", "grok-imagine-video-1.5-preview",
+	} {
+		assert.Falsef(t, isOpenAIFamilyModel(model), "model %q must remain outside the OpenAI/C2A family", model)
+	}
 }
 
 func TestDetectJSONOrdinaryTextDoesNotBecomeAnImageRequest(t *testing.T) {

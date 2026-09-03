@@ -2,6 +2,7 @@ package common
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -73,29 +74,141 @@ func CreateDiskCacheFile(cacheType DiskCacheType) (string, *os.File, error) {
 
 // WriteDiskCacheFile writes data to a managed cache file and returns its path.
 func WriteDiskCacheFile(cacheType DiskCacheType, data []byte) (string, error) {
+	if err := reserveDiskCacheBytes(int64(len(data))); err != nil {
+		return "", err
+	}
+	reserved := true
+	defer func() {
+		if reserved {
+			releaseDiskCacheBytes(int64(len(data)))
+		}
+	}()
 	filePath, file, err := CreateDiskCacheFile(cacheType)
 	if err != nil {
 		return "", err
 	}
 
+	registerActiveDiskCacheFile(filePath)
 	_, err = file.Write(data)
 	if err != nil {
 		file.Close()
 		os.Remove(filePath)
+		unregisterActiveDiskCacheFile(filePath)
 		return "", fmt.Errorf("failed to write cache file: %w", err)
 	}
 
 	if err := file.Close(); err != nil {
 		os.Remove(filePath)
+		unregisterActiveDiskCacheFile(filePath)
 		return "", fmt.Errorf("failed to close cache file: %w", err)
 	}
 
+	incrementDiskFileCount()
+	reserved = false
 	return filePath, nil
 }
 
 // WriteDiskCacheFileString writes a string to a managed cache file.
 func WriteDiskCacheFileString(cacheType DiskCacheType, data string) (string, error) {
-	return WriteDiskCacheFile(cacheType, []byte(data))
+	if err := reserveDiskCacheBytes(int64(len(data))); err != nil {
+		return "", err
+	}
+	reserved := true
+	defer func() {
+		if reserved {
+			releaseDiskCacheBytes(int64(len(data)))
+		}
+	}()
+	filePath, file, err := CreateDiskCacheFile(cacheType)
+	if err != nil {
+		return "", err
+	}
+	registerActiveDiskCacheFile(filePath)
+	if _, err = io.WriteString(file, data); err != nil {
+		file.Close()
+		os.Remove(filePath)
+		unregisterActiveDiskCacheFile(filePath)
+		return "", fmt.Errorf("failed to write cache file: %w", err)
+	}
+	if err = file.Close(); err != nil {
+		os.Remove(filePath)
+		unregisterActiveDiskCacheFile(filePath)
+		return "", fmt.Errorf("failed to close cache file: %w", err)
+	}
+	incrementDiskFileCount()
+	reserved = false
+	return filePath, nil
+}
+
+func ReleaseDiskCacheFileOwnership(filePath string, size int64) {
+	unregisterActiveDiskCacheFile(filePath)
+	decrementDiskFileCount()
+	releaseDiskCacheBytes(size)
+}
+
+// ReservedDiskCacheWriter incrementally reserves every byte before it is
+// written and transfers the committed reservation to the returned file owner.
+type ReservedDiskCacheWriter struct {
+	file        *os.File
+	filePath    string
+	reservation *diskCacheReservation
+	written     int64
+	committed   bool
+}
+
+func NewReservedDiskCacheWriter(cacheType DiskCacheType, initialReservation int64) (*ReservedDiskCacheWriter, error) {
+	reservation := &diskCacheReservation{}
+	if err := reservation.ensure(initialReservation); err != nil {
+		return nil, err
+	}
+	filePath, file, err := CreateDiskCacheFile(cacheType)
+	if err != nil {
+		reservation.release()
+		return nil, err
+	}
+	registerActiveDiskCacheFile(filePath)
+	return &ReservedDiskCacheWriter{file: file, filePath: filePath, reservation: reservation}, nil
+}
+
+func (w *ReservedDiskCacheWriter) Write(data []byte) (int, error) {
+	target := w.written + int64(len(data))
+	if target < w.written {
+		return 0, ErrDiskCacheCapacityExhausted
+	}
+	if err := w.reservation.ensure(target); err != nil {
+		return 0, err
+	}
+	n, err := w.file.Write(data)
+	w.written += int64(n)
+	if err == nil && n != len(data) {
+		err = io.ErrShortWrite
+	}
+	return n, err
+}
+
+func (w *ReservedDiskCacheWriter) Commit() (string, int64, error) {
+	if w.committed {
+		return "", 0, fmt.Errorf("disk cache writer already committed")
+	}
+	if err := w.file.Close(); err != nil {
+		w.Abort()
+		return "", 0, err
+	}
+	w.reservation.trimTo(w.written)
+	incrementDiskFileCount()
+	w.committed = true
+	return w.filePath, w.written, nil
+}
+
+func (w *ReservedDiskCacheWriter) Abort() {
+	if w == nil || w.committed {
+		return
+	}
+	_ = w.file.Close()
+	_ = os.Remove(w.filePath)
+	unregisterActiveDiskCacheFile(w.filePath)
+	w.reservation.release()
+	w.committed = true
 }
 
 // ReadDiskCacheFile reads a managed cache file.
@@ -188,5 +301,5 @@ func ShouldUseDiskCache(dataSize int64) bool {
 	if dataSize < threshold {
 		return false
 	}
-	return IsDiskCacheAvailable(dataSize)
+	return true
 }

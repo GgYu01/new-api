@@ -37,6 +37,7 @@ var ModelList = []string{
 	"gpt-5-mini", "gpt-5-mini-2025-08-07",
 	"gpt-5-nano", "gpt-5-nano-2025-08-07",
 	"gpt-5-codex",
+	"codex-auto-review",
 	"gpt-5-pro", "gpt-5-pro-2025-10-06",
 	"gpt-5-search-api", "gpt-5-search-api-2025-10-14",
 	"gpt-5.1", "gpt-5.1-2025-11-13", "gpt-5.1-chat-latest",

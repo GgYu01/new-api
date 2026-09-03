@@ -115,6 +115,16 @@ function installApiFixtures(createdPayloads: Array<Record<string, unknown>>) {
             data: { groups: ['vip', 'default'], max_count: 3 },
           },
         }
+      case '/api/subscription/types':
+        return {
+          data: {
+            success: true,
+            data: [
+              { value: 'gptopenaicodex', label: 'GPT / OpenAI / Codex only' },
+              { value: 'grok', label: 'Grok only' },
+            ],
+          },
+        }
       default:
         throw new Error(`Unexpected GET ${url}`)
     }

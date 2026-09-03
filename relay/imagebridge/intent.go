@@ -17,6 +17,8 @@ const (
 	maxPromptBytes         = 8000
 )
 
+var openAIFamilyModelPattern = regexp.MustCompile(`^o\d(?:[-.]|$)`)
+
 type Envelope string
 
 const (
@@ -117,8 +119,15 @@ func detect(path string, payload map[string]any) (Intent, bool, error) {
 		sizeValue = imageTool["size"]
 	}
 	n := uint(clampImageCount(nValue))
+	requestModel := DefaultModel
+	// The image bridge uses DefaultModel only for OpenAI/Codex image
+	// conversion. Explicit foreign-provider image models must remain the
+	// channel-selection model so they pass through NewAPI/CPA unchanged.
+	if clientModel != "" && !isOpenAIFamilyModel(clientModel) {
+		requestModel = clientModel
+	}
 	request := dto.ImageRequest{
-		Model:          DefaultModel,
+		Model:          requestModel,
 		Prompt:         prompt,
 		N:              &n,
 		Size:           requestedSize(sizeValue, prompt),
@@ -136,6 +145,18 @@ func detect(path string, payload map[string]any) (Intent, bool, error) {
 		StreamSet:   streamSet,
 		ImageCount:  imageCount,
 	}, true, nil
+}
+
+func isOpenAIFamilyModel(model string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(model))
+	return strings.HasPrefix(normalized, "gpt-") ||
+		strings.HasPrefix(normalized, "gpt_image") ||
+		strings.HasPrefix(normalized, "gpt-image") ||
+		strings.HasPrefix(normalized, "dall-e") ||
+		strings.HasPrefix(normalized, "dalle") ||
+		strings.HasPrefix(normalized, "codex") ||
+		strings.HasPrefix(normalized, "chatgpt") ||
+		openAIFamilyModelPattern.MatchString(normalized)
 }
 
 func hasImageTool(payload map[string]any) bool {

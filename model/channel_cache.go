@@ -209,12 +209,12 @@ func GetRandomSatisfiedChannel(group string, model string, retry int, requestPat
 }
 
 // filterChannelsByRequestPathAndModel restricts candidates by request path and
-// model. Only Advanced Custom (type 58) channels are path-checked: they are kept
-// only when one of their configured routes matches requestPath and model. All
-// other channel types always pass. When requestPath is empty, filtering is skipped.
+// model. Only Advanced Custom (type 58) channels are path-checked, plus the
+// explicit OpenAI ownership guard for codex-auto-review. When requestPath is
+// empty, only that ownership guard is evaluated.
 // Caller must hold channelSyncLock (read lock). The cached slice is never mutated.
 func filterChannelsByRequestPathAndModel(channels []int, requestPath string, model string) []int {
-	if requestPath == "" || len(channels) == 0 {
+	if len(channels) == 0 || (requestPath == "" && !isCodexAutoReviewModel(model)) {
 		return channels
 	}
 	filtered := make([]int, 0, len(channels))
@@ -222,6 +222,13 @@ func filterChannelsByRequestPathAndModel(channels []int, requestPath string, mod
 		channel, ok := channelsIDM[channelId]
 		if !ok {
 			// keep it so the downstream consistency error is raised as before
+			filtered = append(filtered, channelId)
+			continue
+		}
+		if !channelCanServeModel(channel, model) {
+			continue
+		}
+		if requestPath == "" {
 			filtered = append(filtered, channelId)
 			continue
 		}
@@ -234,6 +241,27 @@ func filterChannelsByRequestPathAndModel(channels []int, requestPath string, mod
 		}
 	}
 	return filtered
+}
+
+func channelCanServeModel(channel *Channel, modelName string) bool {
+	if channel == nil {
+		return false
+	}
+	// codex-auto-review is explicitly owned by OpenAI. A stale ability on the
+	// native Codex channel must not silently route it through the Codex adaptor.
+	isAutoReview := isCodexAutoReviewModel(modelName)
+	return !(isAutoReview && channel.Type == constant.ChannelTypeCodex)
+}
+
+func isCodexAutoReviewModel(modelName string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(modelName))
+	return normalized == "codex-auto-review" || strings.HasPrefix(normalized, "codex-auto-review-")
+}
+
+// ChannelCanServeModel exposes the narrow provider guard to middleware and
+// retry paths without exposing channel-cache internals.
+func ChannelCanServeModel(channel *Channel, modelName string) bool {
+	return channelCanServeModel(channel, modelName)
 }
 
 func CacheGetChannel(id int) (*Channel, error) {

@@ -7,11 +7,19 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/relay/channel/codex"
+	"github.com/QuantumNous/new-api/relay/channel/openai"
 	"github.com/QuantumNous/new-api/setting"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestCodexAutoReviewUsesOpenAIOwnerAndNotCodexOwner(t *testing.T) {
+	assert.Contains(t, openai.ModelList, "codex-auto-review")
+	assert.NotContains(t, codex.ModelList, "codex-auto-review")
+}
 
 func TestChannelOwnerNameUsesAdaptorChannelName(t *testing.T) {
 	tests := []struct {
@@ -51,6 +59,11 @@ func TestChannelOwnerNameUsesAdaptorChannelName(t *testing.T) {
 func TestBuildOpenAIModelOverridesOwnedBy(t *testing.T) {
 	modelItem := buildOpenAIModel("gpt-5.4", map[string]string{"gpt-5.4": "openai"})
 	require.Equal(t, "gpt-5.4", modelItem.Id)
+	require.Equal(t, "openai", modelItem.OwnedBy)
+}
+
+func TestBuildOpenAIModelPinsCodexAutoReviewToOpenAI(t *testing.T) {
+	modelItem := buildOpenAIModel("codex-auto-review", map[string]string{"codex-auto-review": "codex"})
 	require.Equal(t, "openai", modelItem.OwnedBy)
 }
 

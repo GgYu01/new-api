@@ -545,6 +545,60 @@ func TestUpdateTokenMasksKeyInResponse(t *testing.T) {
 	}
 }
 
+func TestUpdateTokenPersistsPerKeySubscriptionType(t *testing.T) {
+	db := setupTokenControllerTestDB(t)
+	token := seedToken(t, db, 1, "scoped-token", "scoped1234token5678")
+
+	body := map[string]any{
+		"id":                   token.Id,
+		"name":                 token.Name,
+		"expired_time":         -1,
+		"remain_quota":         100,
+		"unlimited_quota":      true,
+		"model_limits_enabled": false,
+		"model_limits":         "",
+		"subscription_type":    "grok",
+		"group":                "default",
+		"cross_group_retry":    false,
+	}
+	ctx, recorder := newAuthenticatedContext(t, http.MethodPut, "/api/token/", body, 1)
+	UpdateToken(ctx)
+	if !decodeAPIResponse(t, recorder).Success {
+		t.Fatal("expected scoped token update to succeed")
+	}
+
+	var persisted model.Token
+	if err := db.First(&persisted, token.Id).Error; err != nil {
+		t.Fatalf("failed to reload token: %v", err)
+	}
+	if persisted.SubscriptionType != model.SubscriptionTypeGrok {
+		t.Fatalf("expected Grok per-key subscription type, got %q", persisted.SubscriptionType)
+	}
+
+	omitBody := map[string]any{
+		"id":                   token.Id,
+		"name":                 "scoped-token-renamed",
+		"expired_time":         -1,
+		"remain_quota":         100,
+		"unlimited_quota":      true,
+		"model_limits_enabled": false,
+		"model_limits":         "",
+		"group":                "default",
+		"cross_group_retry":    false,
+	}
+	ctx, recorder = newAuthenticatedContext(t, http.MethodPut, "/api/token/", omitBody, 1)
+	UpdateToken(ctx)
+	if !decodeAPIResponse(t, recorder).Success {
+		t.Fatal("expected legacy token update to succeed")
+	}
+	if err := db.First(&persisted, token.Id).Error; err != nil {
+		t.Fatalf("failed to reload token after legacy update: %v", err)
+	}
+	if persisted.SubscriptionType != model.SubscriptionTypeGrok {
+		t.Fatalf("expected omitted scope to preserve Grok, got %q", persisted.SubscriptionType)
+	}
+}
+
 func TestGetTokenKeyRequiresOwnershipAndReturnsFullKey(t *testing.T) {
 	db := setupTokenControllerTestDB(t)
 	token := seedToken(t, db, 1, "owned-token", "owner1234token5678")

@@ -70,7 +70,11 @@ import {
   createWaffoPancakeSubscriptionProduct,
   listWaffoPancakeSubscriptionProductOptions,
 } from '../api'
-import { getDurationUnitOptions, getResetPeriodOptions } from '../constants'
+import {
+  getDurationUnitOptions,
+  getResetPeriodOptions,
+  getSubscriptionTypeOptions,
+} from '../constants'
 import {
   getPlanFormSchema,
   PLAN_FORM_DEFAULTS,
@@ -247,6 +251,7 @@ export function SubscriptionsMutateDrawer({
 
   const durationUnitOpts = getDurationUnitOptions(t)
   const resetPeriodOpts = getResetPeriodOptions(t)
+  const subscriptionTypeOpts = getSubscriptionTypeOptions(t)
 
   return (
     <Sheet
@@ -312,6 +317,45 @@ export function SubscriptionsMutateDrawer({
                         placeholder={t('e.g. Suitable for light usage')}
                       />
                     </FormControl>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+
+              <FormField
+                control={form.control}
+                name='subscription_type'
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>{t('Subscription Type')}</FormLabel>
+                    <Select
+                      items={subscriptionTypeOpts.map((option) => ({
+                        value: option.value,
+                        label: option.label,
+                      }))}
+                      onValueChange={field.onChange}
+                      value={field.value}
+                    >
+                      <FormControl>
+                        <SelectTrigger>
+                          <SelectValue />
+                        </SelectTrigger>
+                      </FormControl>
+                      <SelectContent alignItemWithTrigger={false}>
+                        <SelectGroup>
+                          {subscriptionTypeOpts.map((option) => (
+                            <SelectItem key={option.value} value={option.value}>
+                              {option.label}
+                            </SelectItem>
+                          ))}
+                        </SelectGroup>
+                      </SelectContent>
+                    </Select>
+                    <FormDescription>
+                      {t(
+                        'This plan can use only the selected provider family.'
+                      )}
+                    </FormDescription>
                     <FormMessage />
                   </FormItem>
                 )}

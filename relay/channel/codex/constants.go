@@ -1,10 +1,6 @@
 package codex
 
-import (
-	"slices"
-
-	"github.com/QuantumNous/new-api/setting/ratio_setting"
-)
+import "github.com/QuantumNous/new-api/setting/ratio_setting"
 
 var baseModelList = []string{
 	"gpt-5.6-sol",
@@ -14,14 +10,8 @@ var baseModelList = []string{
 	"gpt-5.4",
 	"gpt-5.4-mini",
 	"gpt-5.3-codex-spark",
-	"codex-auto-review",
 }
 
-var ModelList = slices.DeleteFunc(
-	ratio_setting.WithCompactModelVariants(baseModelList),
-	func(modelName string) bool {
-		return modelName == ratio_setting.WithCompactModelSuffix("codex-auto-review")
-	},
-)
+var ModelList = ratio_setting.WithCompactModelVariants(baseModelList)
 
 const ChannelName = "codex"

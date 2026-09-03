@@ -16,7 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { type ColumnDef } from '@tanstack/react-table'
+import type { ColumnDef } from '@tanstack/react-table'
 import { useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 
@@ -73,6 +73,26 @@ export function useSubscriptionsColumns(): ColumnDef<PlanRecord>[] {
           </span>
         ),
         size: 100,
+      },
+      {
+        accessorFn: (row) => row.plan.subscription_type,
+        id: 'subscription_type',
+        header: t('Subscription Type'),
+        cell: ({ row }) => {
+          const type = row.original.plan.subscription_type
+          return (
+            <StatusBadge
+              label={
+                type === 'grok'
+                  ? t('Grok only')
+                  : t('GPT / OpenAI / Codex only')
+              }
+              variant={type === 'grok' ? 'warning' : 'info'}
+              copyable={false}
+            />
+          )
+        },
+        size: 180,
       },
       {
         id: 'duration',

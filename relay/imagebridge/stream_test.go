@@ -37,6 +37,27 @@ func TestDetectJSONReaderDoesNotRetainLargeImageString(t *testing.T) {
 	assert.Less(t, len(intent.InputImages[0].preview), 1<<16)
 }
 
+func TestDetectJSONReaderDoesNotTreatKeysAfterLargeValuesAsTruncated(t *testing.T) {
+	large := strings.Repeat("x", maxJSONPreviewBytes+1024)
+	payload := []byte(`{"input":[{"type":"input_text","text":"` + large + `"}],"model":"gpt-5.6-sol","tools":[{"type":"image_generation"}]}`)
+
+	intent, matched, err := DetectJSONReader("/v1/responses", bytes.NewReader(payload))
+
+	require.NoError(t, err)
+	require.True(t, matched)
+	assert.Equal(t, "gpt-5.6-sol", intent.ClientModel)
+}
+
+func TestDetectJSONReaderStillRejectsOversizedObjectKeys(t *testing.T) {
+	key := strings.Repeat("k", maxJSONObjectKeyBytes+1)
+	payload := []byte(`{"` + key + `":true}`)
+
+	_, _, err := DetectJSONReader("/v1/responses", bytes.NewReader(payload))
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "object key exceeds 4096 bytes")
+}
+
 func TestNewEditBodyStreamsJSONDataURLIntoMultipart(t *testing.T) {
 	rawImage := append([]byte("\x89PNG\r\n\x1a\n"), bytes.Repeat([]byte{0x41}, 256<<10)...)
 	encoded := base64.StdEncoding.EncodeToString(rawImage)

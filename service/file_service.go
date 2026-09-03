@@ -170,6 +170,16 @@ func loadFromURL(c *gin.Context, url string, reason ...string) (*types.CachedFil
 	if resp.StatusCode != 200 {
 		return nil, fmt.Errorf("failed to download file, status code: %d", resp.StatusCode)
 	}
+	if resp.ContentLength > int64(maxFileSize) {
+		return nil, fmt.Errorf("file size exceeds maximum allowed size: %dMB", constant.MaxFileDownloadMB)
+	}
+	encodedLength := int64(-1)
+	if resp.ContentLength >= 0 {
+		encodedLength = ((resp.ContentLength + 2) / 3) * 4
+	}
+	if common.IsDiskCacheEnabled() && (encodedLength < 0 || encodedLength >= common.GetDiskCacheThresholdBytes()) {
+		return loadURLResponseToDisk(c, resp, url, int64(maxFileSize), encodedLength)
+	}
 
 	// 读取文件内容（限制大小）
 	if common.DebugEnabled {
@@ -197,16 +207,13 @@ func loadFromURL(c *gin.Context, url string, reason ...string) (*types.CachedFil
 		// 使用磁盘缓存
 		diskPath, err := writeToDiskCache(base64Data)
 		if err != nil {
-			// 磁盘缓存失败，回退到内存
-			logger.LogWarn(c, fmt.Sprintf("Failed to write to disk cache, falling back to memory: %v", err))
-			cachedData = types.NewMemoryCachedData(base64Data, mimeType, int64(len(fileBytes)))
+			return nil, fmt.Errorf("disk cache capacity unavailable: %w", err)
 		} else {
 			cachedData = types.NewDiskCachedData(diskPath, mimeType, int64(len(fileBytes)))
 			cachedData.DiskSize = base64Size
 			cachedData.OnClose = func(size int64) {
-				common.DecrementDiskFiles(size)
+				common.ReleaseDiskCacheFileOwnership(diskPath, size)
 			}
-			common.IncrementDiskFiles(base64Size)
 			if common.DebugEnabled {
 				logger.LogDebug(c, "File cached to disk: %s, size: %d bytes", diskPath, base64Size)
 			}
@@ -232,6 +239,74 @@ func loadFromURL(c *gin.Context, url string, reason ...string) (*types.CachedFil
 		}
 	}
 
+	return cachedData, nil
+}
+
+type boundedPrefixCounter struct {
+	prefix []byte
+	total  int64
+}
+
+func (w *boundedPrefixCounter) Write(data []byte) (int, error) {
+	w.total += int64(len(data))
+	if len(w.prefix) < 1<<20 {
+		remaining := (1 << 20) - len(w.prefix)
+		if remaining > len(data) {
+			remaining = len(data)
+		}
+		w.prefix = append(w.prefix, data[:remaining]...)
+	}
+	return len(data), nil
+}
+
+func loadURLResponseToDisk(c *gin.Context, resp *http.Response, sourceURL string, maxRawBytes int64, expectedEncoded int64) (*types.CachedFileData, error) {
+	initialReservation := expectedEncoded
+	if initialReservation < 0 {
+		initialReservation = 0
+	}
+	writer, err := common.NewReservedDiskCacheWriter(common.DiskCacheTypeFile, initialReservation)
+	if err != nil {
+		return nil, fmt.Errorf("disk cache capacity unavailable: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			writer.Abort()
+		}
+	}()
+	counter := &boundedPrefixCounter{}
+	encoder := base64.NewEncoder(base64.StdEncoding, writer)
+	_, copyErr := io.Copy(encoder, io.TeeReader(io.LimitReader(resp.Body, maxRawBytes+1), counter))
+	closeErr := encoder.Close()
+	if copyErr != nil {
+		return nil, fmt.Errorf("failed to stream file content: %w", copyErr)
+	}
+	if closeErr != nil {
+		return nil, fmt.Errorf("failed to finalize base64 content: %w", closeErr)
+	}
+	if counter.total > maxRawBytes {
+		return nil, fmt.Errorf("file size exceeds maximum allowed size: %dMB", constant.MaxFileDownloadMB)
+	}
+	if resp.ContentLength >= 0 && counter.total != resp.ContentLength {
+		return nil, fmt.Errorf("download body truncated: expected %d bytes, received %d", resp.ContentLength, counter.total)
+	}
+	diskPath, diskSize, err := writer.Commit()
+	if err != nil {
+		return nil, fmt.Errorf("failed to commit disk cache: %w", err)
+	}
+	committed = true
+	mimeType := smartDetectMimeType(resp, sourceURL, counter.prefix)
+	cachedData := types.NewDiskCachedData(diskPath, mimeType, counter.total)
+	cachedData.DiskSize = diskSize
+	cachedData.OnClose = func(size int64) {
+		common.ReleaseDiskCacheFileOwnership(diskPath, size)
+	}
+	if strings.HasPrefix(mimeType, "image/") {
+		if config, format, decodeErr := decodeImageConfig(counter.prefix); decodeErr == nil {
+			cachedData.ImageConfig = &config
+			cachedData.ImageFormat = format
+		}
+	}
 	return cachedData, nil
 }
 
@@ -345,32 +420,36 @@ func loadFromBase64(base64String string, providedMimeType string) (*types.Cached
 		mimeType = providedMimeType
 	}
 
-	decodedData, err := base64.StdEncoding.DecodeString(cleanBase64)
+	base64Size := int64(len(cleanBase64))
+	var cachedData *types.CachedFileData
+	decoder := base64.NewDecoder(base64.StdEncoding, strings.NewReader(cleanBase64))
+	decodedPrefix, err := io.ReadAll(io.LimitReader(decoder, 1<<20))
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode base64 data: %w", err)
 	}
-
-	base64Size := int64(len(cleanBase64))
-	var cachedData *types.CachedFileData
+	restSize, err := io.Copy(io.Discard, decoder)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode base64 data: %w", err)
+	}
+	decodedSize := int64(len(decodedPrefix)) + restSize
 
 	if shouldUseDiskCache(base64Size) {
 		diskPath, err := writeToDiskCache(cleanBase64)
 		if err != nil {
-			cachedData = types.NewMemoryCachedData(cleanBase64, mimeType, int64(len(decodedData)))
+			return nil, fmt.Errorf("disk cache capacity unavailable: %w", err)
 		} else {
-			cachedData = types.NewDiskCachedData(diskPath, mimeType, int64(len(decodedData)))
+			cachedData = types.NewDiskCachedData(diskPath, mimeType, decodedSize)
 			cachedData.DiskSize = base64Size
 			cachedData.OnClose = func(size int64) {
-				common.DecrementDiskFiles(size)
+				common.ReleaseDiskCacheFileOwnership(diskPath, size)
 			}
-			common.IncrementDiskFiles(base64Size)
 		}
 	} else {
-		cachedData = types.NewMemoryCachedData(cleanBase64, mimeType, int64(len(decodedData)))
+		cachedData = types.NewMemoryCachedData(cleanBase64, mimeType, decodedSize)
 	}
 
 	if mimeType == "" || strings.HasPrefix(mimeType, "image/") {
-		config, format, err := decodeImageConfig(decodedData)
+		config, format, err := decodeImageConfig(decodedPrefix)
 		if err == nil {
 			cachedData.ImageConfig = &config
 			cachedData.ImageFormat = format

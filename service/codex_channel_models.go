@@ -79,9 +79,15 @@ func fetchCodexChannelModels(
 		return nil, fmt.Errorf("upstream status: %d", statusCode)
 	}
 	modelVariants := make([]string, 0, len(models)*2)
-	modelVariants = append(modelVariants, models...)
 	for _, modelName := range models {
-		if modelName == "codex-auto-review" {
+		// codex-auto-review is explicitly owned by the OpenAI provider. Do not
+		// re-advertise it from a Codex channel during dynamic model discovery.
+		if !strings.EqualFold(modelName, "codex-auto-review") {
+			modelVariants = append(modelVariants, modelName)
+		}
+	}
+	for _, modelName := range models {
+		if strings.EqualFold(modelName, "codex-auto-review") {
 			continue
 		}
 		modelVariants = append(modelVariants, ratio_setting.WithCompactModelSuffix(modelName))

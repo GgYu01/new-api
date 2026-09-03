@@ -173,12 +173,9 @@ func (p *jsonStreamParser) parseObject(depth int) (map[string]any, error) {
 		if quote != '"' {
 			return nil, fmt.Errorf("object key must be a string at byte %d", p.offset)
 		}
-		keyToken, err := p.parseString()
+		keyToken, err := p.parseObjectKey()
 		if err != nil {
 			return nil, err
-		}
-		if keyToken.truncated || keyToken.rawLength > maxJSONObjectKeyBytes {
-			return nil, fmt.Errorf("object key exceeds %d bytes", maxJSONObjectKeyBytes)
 		}
 		if err := p.skipSpace(); err != nil {
 			return nil, err
@@ -211,6 +208,42 @@ func (p *jsonStreamParser) parseObject(depth int) (map[string]any, error) {
 			return nil, fmt.Errorf("invalid object separator at byte %d", p.offset)
 		}
 	}
+}
+
+// parseObjectKey parses a key independently of the value preview budget. A
+// large request value must not make a later, ordinary key look truncated.
+func (p *jsonStreamParser) parseObjectKey() (scannedString, error) {
+	start := p.offset
+	raw := make([]byte, 0, min(maxJSONObjectKeyBytes, 256))
+	escaped := false
+	for {
+		b, err := p.readByte()
+		if err != nil {
+			return scannedString{}, fmt.Errorf("unterminated JSON string: %w", err)
+		}
+		if !escaped && b == '"' {
+			break
+		}
+		if !escaped && b < 0x20 {
+			return scannedString{}, fmt.Errorf("unescaped control character in JSON string")
+		}
+		if len(raw) < maxJSONObjectKeyBytes {
+			raw = append(raw, b)
+		} else {
+			return scannedString{}, fmt.Errorf("object key exceeds %d bytes", maxJSONObjectKeyBytes)
+		}
+		if escaped {
+			escaped = false
+		} else if b == '\\' {
+			escaped = true
+		}
+	}
+	rawLength := p.offset - start - 1
+	value, err := strconv.Unquote(`"` + string(raw) + `"`)
+	if err != nil {
+		return scannedString{}, fmt.Errorf("invalid JSON string: %w", err)
+	}
+	return scannedString{value: value, rawOffset: start, rawLength: rawLength}, nil
 }
 
 func (p *jsonStreamParser) parseArray(depth int) ([]any, error) {

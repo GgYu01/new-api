@@ -34,6 +34,26 @@ func TestDetectImageBridgeOverridesOnlyChannelSelectionModel(t *testing.T) {
 	assert.Equal(t, imagebridge.DefaultModel, modelRequest.Model)
 }
 
+func TestDetectImageBridgePreservesForeignImageModelForChannelSelection(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	context, _ := gin.CreateTestContext(recorder)
+	context.Request = httptest.NewRequest(http.MethodPost, "/v1/images/generations", strings.NewReader(`{
+		"model":"grok-imagine-image","prompt":"draw a fox"
+	}`))
+	context.Request.Header.Set("Content-Type", "application/json")
+
+	DetectImageBridge()(context)
+	intent, ok := imagebridge.FromContext(context)
+
+	require.True(t, ok)
+	assert.Equal(t, "grok-imagine-image", intent.ClientModel)
+	modelRequest, shouldSelect, err := getModelRequest(context)
+	require.NoError(t, err)
+	assert.True(t, shouldSelect)
+	assert.Equal(t, "grok-imagine-image", modelRequest.Model)
+}
+
 func TestDetectImageBridgeLeavesOrdinaryResponsesRequestUntouched(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()
