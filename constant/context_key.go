@@ -18,8 +18,11 @@ const (
 	ContextKeyTokenSpecificChannelId ContextKey = "specific_channel_id"
 	ContextKeyTokenModelLimitEnabled ContextKey = "token_model_limit_enabled"
 	ContextKeyTokenModelLimit        ContextKey = "token_model_limit"
+	ContextKeyTokenSubscriptionType  ContextKey = "token_subscription_type"
+	ContextKeyTokenScopeExempt       ContextKey = "token_scope_exempt"
 	ContextKeyTokenCrossGroupRetry   ContextKey = "token_cross_group_retry"
 	ContextKeyTokenAutoGroups        ContextKey = "token_auto_groups"
+	ContextKeySubscriptionAccess     ContextKey = "subscription_access"
 
 	/* channel related keys */
 	ContextKeyChannelId                ContextKey = "channel_id"

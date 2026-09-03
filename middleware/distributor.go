@@ -44,6 +44,43 @@ func Distribute() func(c *gin.Context) {
 			abortWithOpenAiMessage(c, http.StatusBadRequest, i18n.T(c, i18n.MsgDistributorInvalidRequest, map[string]any{"Error": err.Error()}))
 			return
 		}
+		subscriptionAccess := model.SubscriptionAccess{}
+		if userID := c.GetInt("id"); userID > 0 {
+			var scopeErr error
+			subscriptionAccess, scopeErr = service.SubscriptionAccessForRequest(c, userID)
+			if scopeErr != nil {
+				abortWithOpenAiMessage(c, http.StatusServiceUnavailable, scopeErr.Error(), types.ErrorCodeModelNotFound)
+				return
+			}
+		}
+		if subscriptionAccess.Enforced {
+			if strings.TrimSpace(modelRequest.Model) == "" && shouldSelectChannel {
+				abortWithOpenAiMessage(c, http.StatusForbidden, i18n.T(c, i18n.MsgDistributorSubscriptionModelRequired), types.ErrorCodeModelNotFound)
+				return
+			}
+			if strings.TrimSpace(modelRequest.Model) != "" && !subscriptionAccess.AllowsRequestModel(modelRequest.Model, shouldSelectChannel) {
+				abortWithOpenAiMessage(c, http.StatusForbidden, i18n.T(c, i18n.MsgDistributorSubscriptionModelForbidden, map[string]any{"Model": modelRequest.Model}), types.ErrorCodeModelNotFound)
+				return
+			}
+		}
+		// A user's active subscriptions form a union, while each API key is
+		// bound to one billing scope. Enforce the key scope before selecting a
+		// channel so cross-provider requests cannot consume the other plan.
+		tokenScope := common.GetContextKeyString(c, constant.ContextKeyTokenSubscriptionType)
+		scopeExempt := common.GetContextKeyBool(c, constant.ContextKeyTokenScopeExempt)
+		if tokenScope != "" {
+			if strings.TrimSpace(modelRequest.Model) == "" && shouldSelectChannel {
+				abortWithOpenAiMessage(c, http.StatusForbidden, i18n.T(c, i18n.MsgDistributorSubscriptionModelRequired), types.ErrorCodeModelNotFound)
+				return
+			}
+			if strings.TrimSpace(modelRequest.Model) != "" && !model.TokenSubscriptionTypeAllowsModel(tokenScope, modelRequest.Model) {
+				abortWithOpenAiMessage(c, http.StatusForbidden, i18n.T(c, i18n.MsgDistributorSubscriptionModelForbidden, map[string]any{"Model": modelRequest.Model}), types.ErrorCodeModelNotFound)
+				return
+			}
+		} else if !scopeExempt && strings.TrimSpace(modelRequest.Model) != "" {
+			abortWithOpenAiMessage(c, http.StatusForbidden, i18n.T(c, i18n.MsgDistributorSubscriptionModelForbidden, map[string]any{"Model": modelRequest.Model}), types.ErrorCodeModelNotFound)
+			return
+		}
 		if ok {
 			id, err := strconv.Atoi(channelId.(string))
 			if err != nil {
@@ -57,6 +94,10 @@ func Distribute() func(c *gin.Context) {
 			}
 			if channel.Status != common.ChannelStatusEnabled {
 				abortWithOpenAiMessage(c, http.StatusForbidden, i18n.T(c, i18n.MsgDistributorChannelDisabled))
+				return
+			}
+			if !model.ChannelCanServeModel(channel, modelRequest.Model) {
+				abortWithOpenAiMessage(c, http.StatusForbidden, i18n.T(c, i18n.MsgDistributorSubscriptionModelForbidden, map[string]any{"Model": modelRequest.Model}), types.ErrorCodeModelNotFound)
 				return
 			}
 		} else {
@@ -111,6 +152,7 @@ func Distribute() func(c *gin.Context) {
 					affinityUsable := false
 					preferred, err := model.CacheGetChannel(preferredChannelID)
 					if err == nil && preferred != nil && preferred.Status == common.ChannelStatusEnabled &&
+						model.ChannelCanServeModel(preferred, modelRequest.Model) &&
 						channelSupportsRequestPath(preferred, requestPath, modelRequest.Model) {
 						if usingGroup == "auto" {
 							userGroup := common.GetContextKeyString(c, constant.ContextKeyUserGroup)
@@ -453,6 +495,9 @@ func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, mode
 	c.Set("original_model", modelName) // for retry
 	if channel == nil {
 		return types.NewError(errors.New("channel is nil"), types.ErrorCodeGetChannelFailed, types.ErrOptionWithSkipRetry())
+	}
+	if !model.ChannelCanServeModel(channel, modelName) {
+		return types.NewErrorWithStatusCode(model.ErrSubscriptionModelNotAllowed, types.ErrorCodeModelNotFound, http.StatusForbidden, types.ErrOptionWithSkipRetry(), types.ErrOptionWithNoRecordErrorLog())
 	}
 	common.SetContextKey(c, constant.ContextKeyChannelId, channel.Id)
 	common.SetContextKey(c, constant.ContextKeyChannelName, channel.Name)

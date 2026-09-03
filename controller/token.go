@@ -324,6 +324,10 @@ func AddToken(c *gin.Context) {
 	// compatible during bootstrap; once scope enforcement is active, never
 	// create a key that would have no entitlement or silently widen access.
 	if !model.IsAdmin(c.GetInt("id")) {
+		if token.ScopeExempt {
+			common.ApiError(c, model.ErrSubscriptionModelNotAllowed)
+			return
+		}
 		access, accessErr := service.SubscriptionAccessForRequest(c, c.GetInt("id"))
 		if accessErr != nil {
 			common.ApiError(c, accessErr)
@@ -361,6 +365,7 @@ func AddToken(c *gin.Context) {
 		ModelLimitsEnabled: token.ModelLimitsEnabled,
 		ModelLimits:        token.ModelLimits,
 		SubscriptionType:   normalizedSubscriptionType,
+		ScopeExempt:        token.ScopeExempt && model.IsAdmin(c.GetInt("id")),
 		AllowIps:           token.AllowIps,
 		Group:              token.Group,
 		CrossGroupRetry:    token.CrossGroupRetry,
@@ -442,12 +447,23 @@ func UpdateToken(c *gin.Context) {
 		cleanToken.ModelLimitsEnabled = token.ModelLimitsEnabled
 		cleanToken.ModelLimits = token.ModelLimits
 		if request.SubscriptionType != nil {
+			if token.ScopeExempt && !model.IsAdmin(userId) {
+				common.ApiError(c, model.ErrSubscriptionModelNotAllowed)
+				return
+			}
 			normalizedSubscriptionType, normalizeErr := model.NormalizeTokenSubscriptionType(*request.SubscriptionType)
 			if normalizeErr != nil {
 				common.ApiError(c, normalizeErr)
 				return
 			}
 			cleanToken.SubscriptionType = normalizedSubscriptionType
+		}
+		if token.ScopeExempt {
+			if !model.IsAdmin(userId) {
+				common.ApiError(c, model.ErrSubscriptionModelNotAllowed)
+				return
+			}
+			cleanToken.ScopeExempt = true
 		}
 		cleanToken.AllowIps = token.AllowIps
 		cleanToken.Group = token.Group
