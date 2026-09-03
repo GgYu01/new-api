@@ -27,14 +27,15 @@ type Token struct {
 	// SubscriptionType binds a normal API key to one paid billing scope.
 	// ScopeExempt is reserved for explicit system/root credentials; it is not a
 	// user-selectable replacement for a missing scope.
-	SubscriptionType string         `json:"subscription_type" gorm:"type:varchar(32);not null;default:''"`
-	ScopeExempt      bool           `json:"scope_exempt" gorm:"not null;default:0"`
-	AllowIps         *string        `json:"allow_ips" gorm:"default:''"`
-	UsedQuota        int            `json:"used_quota" gorm:"default:0"` // used quota
-	Group            string         `json:"group" gorm:"default:''"`
-	CrossGroupRetry  bool           `json:"cross_group_retry"` // 跨分组重试，仅auto分组有效
-	AutoGroups       string         `json:"-" gorm:"type:text"`
-	DeletedAt        gorm.DeletedAt `gorm:"index"`
+	SubscriptionType        string         `json:"subscription_type" gorm:"type:varchar(32);not null;default:''"`
+	ScopeExempt             bool           `json:"scope_exempt" gorm:"not null;default:0"`
+	ScopeAssignmentRequired bool           `json:"scope_assignment_required" gorm:"not null;default:0"`
+	AllowIps                *string        `json:"allow_ips" gorm:"default:''"`
+	UsedQuota               int            `json:"used_quota" gorm:"default:0"` // used quota
+	Group                   string         `json:"group" gorm:"default:''"`
+	CrossGroupRetry         bool           `json:"cross_group_retry"` // 跨分组重试，仅auto分组有效
+	AutoGroups              string         `json:"-" gorm:"type:text"`
+	DeletedAt               gorm.DeletedAt `gorm:"index"`
 }
 
 func (token *Token) GetAutoGroups() ([]string, error) {
