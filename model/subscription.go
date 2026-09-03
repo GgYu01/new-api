@@ -181,6 +181,10 @@ type SubscriptionPlan struct {
 	// Total quota (amount in quota units, 0 = unlimited)
 	TotalAmount int64 `json:"total_amount" gorm:"type:bigint;not null;default:0"`
 
+	// SubscriptionType limits which provider family may consume this plan.
+	// Empty values from legacy rows are migrated/defaulted to GPT/OpenAI/Codex.
+	SubscriptionType string `json:"subscription_type" gorm:"column:subscription_type;type:varchar(32);not null;default:'gptopenaicodex'"`
+
 	// Quota reset period for plan
 	QuotaResetPeriod        string `json:"quota_reset_period" gorm:"type:varchar(16);default:'never'"`
 	QuotaResetCustomSeconds int64  `json:"quota_reset_custom_seconds" gorm:"type:bigint;default:0"`
@@ -190,6 +194,11 @@ type SubscriptionPlan struct {
 }
 
 func (p *SubscriptionPlan) BeforeCreate(tx *gorm.DB) error {
+	typ, err := canonicalSubscriptionType(p.SubscriptionType)
+	if err != nil {
+		return err
+	}
+	p.SubscriptionType = typ
 	now := common.GetTimestamp()
 	p.CreatedAt = now
 	p.UpdatedAt = now
@@ -197,11 +206,17 @@ func (p *SubscriptionPlan) BeforeCreate(tx *gorm.DB) error {
 }
 
 func (p *SubscriptionPlan) BeforeUpdate(tx *gorm.DB) error {
+	typ, err := canonicalSubscriptionType(p.SubscriptionType)
+	if err != nil {
+		return err
+	}
+	p.SubscriptionType = typ
 	p.UpdatedAt = common.GetTimestamp()
 	return nil
 }
 
 func (p *SubscriptionPlan) NormalizeDefaults() {
+	p.SubscriptionType = NormalizeSubscriptionType(p.SubscriptionType)
 	if p.AllowBalancePay == nil {
 		p.AllowBalancePay = common.GetPointer(true)
 	}
@@ -276,11 +291,20 @@ type UserSubscription struct {
 	// Whether wallet fallback is allowed after this subscription's quota is exhausted (snapshot from plan)
 	AllowWalletOverflow bool `json:"allow_wallet_overflow"`
 
+	// SubscriptionType is snapshotted at purchase/bind time so changing a plan
+	// later cannot silently widen or narrow an already-paid subscription.
+	SubscriptionType string `json:"subscription_type" gorm:"column:subscription_type;type:varchar(32);not null;default:'gptopenaicodex'"`
+
 	CreatedAt int64 `json:"created_at" gorm:"bigint"`
 	UpdatedAt int64 `json:"updated_at" gorm:"bigint"`
 }
 
 func (s *UserSubscription) BeforeCreate(tx *gorm.DB) error {
+	typ, err := canonicalSubscriptionType(s.SubscriptionType)
+	if err != nil {
+		return err
+	}
+	s.SubscriptionType = typ
 	now := common.GetTimestamp()
 	s.CreatedAt = now
 	s.UpdatedAt = now
@@ -491,6 +515,11 @@ func CreateUserSubscriptionFromPlanTx(tx *gorm.DB, userId int, plan *Subscriptio
 	if userId <= 0 {
 		return nil, errors.New("invalid user id")
 	}
+	typ, err := canonicalSubscriptionType(plan.SubscriptionType)
+	if err != nil {
+		return nil, err
+	}
+	plan.SubscriptionType = typ
 	if plan.MaxPurchasePerUser > 0 {
 		var count int64
 		if err := tx.Model(&UserSubscription{}).
@@ -548,6 +577,7 @@ func CreateUserSubscriptionFromPlanTx(tx *gorm.DB, userId int, plan *Subscriptio
 		PrevUserGroup:       prevGroup,
 		DowngradeGroup:      strings.TrimSpace(plan.DowngradeGroup),
 		AllowWalletOverflow: allowWalletOverflow,
+		SubscriptionType:    plan.SubscriptionType,
 		CreatedAt:           common.GetTimestamp(),
 		UpdatedAt:           common.GetTimestamp(),
 	}
@@ -867,17 +897,21 @@ func HasActiveUserSubscription(userId int) (bool, error) {
 }
 
 // UserActiveSubscriptionsAllowWalletOverflow returns whether wallet balance may be used
-// after the user's subscription quota is exhausted. A single active subscription that
-// disallows wallet overflow (allow_wallet_overflow = false) blocks the fallback.
-func UserActiveSubscriptionsAllowWalletOverflow(userId int) (bool, error) {
+// after the selected subscription scope is exhausted. Other model-family rows must not
+// affect this request's fallback decision.
+func UserActiveSubscriptionsAllowWalletOverflow(userId int, subscriptionType string) (bool, error) {
 	if userId <= 0 {
 		return false, errors.New("invalid userId")
+	}
+	typ, err := canonicalSubscriptionType(subscriptionType)
+	if err != nil {
+		return false, err
 	}
 	now := common.GetTimestamp()
 	var strictCount int64
 	if err := DB.Model(&UserSubscription{}).
-		Where("user_id = ? AND status = ? AND end_time > ? AND allow_wallet_overflow = ?",
-			userId, "active", now, false).
+		Where("user_id = ? AND subscription_type = ? AND status = ? AND end_time > ? AND allow_wallet_overflow = ?",
+			userId, typ, "active", now, false).
 		Count(&strictCount).Error; err != nil {
 		return false, err
 	}
@@ -1313,6 +1347,18 @@ func PreConsumeUserSubscription(requestId string, userId int, modelName string, 
 			if err := tx.Where("id = ?", existing.UserSubscriptionId).First(&sub).Error; err != nil {
 				return err
 			}
+			if strings.TrimSpace(modelName) != "" {
+				subscriptionType := sub.SubscriptionType
+				if strings.TrimSpace(subscriptionType) == "" {
+					var plan SubscriptionPlan
+					if err := tx.Where("id = ?", sub.PlanId).First(&plan).Error; err == nil {
+						subscriptionType = plan.SubscriptionType
+					}
+				}
+				if !IsModelAllowedBySubscriptionType(subscriptionType, modelName) {
+					return ErrSubscriptionModelNotAllowed
+				}
+			}
 			returnValue.UserSubscriptionId = sub.Id
 			returnValue.PreConsumed = existing.PreConsumed
 			returnValue.AmountTotal = sub.AmountTotal
@@ -1331,12 +1377,21 @@ func PreConsumeUserSubscription(requestId string, userId int, modelName string, 
 		if len(subs) == 0 {
 			return errors.New("no active subscription")
 		}
+		matchedSubscriptionType := false
 		for _, candidate := range subs {
 			sub := candidate
 			plan, err := getSubscriptionPlanByIdTx(tx, sub.PlanId)
 			if err != nil {
 				return err
 			}
+			subscriptionType := sub.SubscriptionType
+			if strings.TrimSpace(subscriptionType) == "" {
+				subscriptionType = plan.SubscriptionType
+			}
+			if strings.TrimSpace(modelName) != "" && !IsModelAllowedBySubscriptionType(subscriptionType, modelName) {
+				continue
+			}
+			matchedSubscriptionType = true
 			if err := maybeResetUserSubscriptionWithPlanTx(tx, &sub, plan, now); err != nil {
 				return err
 			}
@@ -1379,6 +1434,9 @@ func PreConsumeUserSubscription(requestId string, userId int, modelName string, 
 			returnValue.AmountUsedBefore = usedBefore
 			returnValue.AmountUsedAfter = sub.AmountUsed
 			return nil
+		}
+		if strings.TrimSpace(modelName) != "" && !matchedSubscriptionType {
+			return ErrSubscriptionModelNotAllowed
 		}
 		return fmt.Errorf("subscription quota insufficient, need=%d", amount)
 	})
@@ -1468,8 +1526,9 @@ func CleanupSubscriptionPreConsumeRecords(olderThanSeconds int64) (int64, error)
 }
 
 type SubscriptionPlanInfo struct {
-	PlanId    int
-	PlanTitle string
+	PlanId           int
+	PlanTitle        string
+	SubscriptionType string
 }
 
 func GetSubscriptionPlanInfoByUserSubscriptionId(userSubscriptionId int) (*SubscriptionPlanInfo, error) {
@@ -1488,9 +1547,14 @@ func GetSubscriptionPlanInfoByUserSubscriptionId(userSubscriptionId int) (*Subsc
 	if err != nil {
 		return nil, err
 	}
+	typ := sub.SubscriptionType
+	if strings.TrimSpace(typ) == "" {
+		typ = plan.SubscriptionType
+	}
 	info := &SubscriptionPlanInfo{
-		PlanId:    sub.PlanId,
-		PlanTitle: plan.Title,
+		PlanId:           sub.PlanId,
+		PlanTitle:        plan.Title,
+		SubscriptionType: NormalizeSubscriptionType(typ),
 	}
 	_ = getSubscriptionPlanInfoCache().SetWithTTL(cacheKey, *info, subscriptionPlanInfoCacheTTL())
 	return info, nil
