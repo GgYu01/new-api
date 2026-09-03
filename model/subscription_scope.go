@@ -446,6 +446,7 @@ func BackfillSubscriptionTypes() error {
 type TokenScopeMigrationReport struct {
 	ExplicitGPT       int `json:"explicit_gpt"`
 	ExplicitGrok      int `json:"explicit_grok"`
+	InvalidScope      int `json:"invalid_scope"`
 	EmptySingleFamily int `json:"empty_single_family"`
 	EmptyAmbiguous    int `json:"empty_ambiguous"`
 	EmptyNoFamily     int `json:"empty_no_family"`
@@ -473,7 +474,9 @@ func PreviewTokenScopeMigration() (TokenScopeMigrationReport, error) {
 		typ := strings.TrimSpace(token.SubscriptionType)
 		if typ != "" {
 			normalized, err := canonicalSubscriptionType(typ)
-			if err == nil && normalized == SubscriptionTypeGrok {
+			if err != nil {
+				report.InvalidScope++
+			} else if normalized == SubscriptionTypeGrok {
 				report.ExplicitGrok++
 			} else {
 				report.ExplicitGPT++
