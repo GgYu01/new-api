@@ -407,7 +407,10 @@ func BackfillSubscriptionTypes() error {
 			}
 			for _, token := range tokens {
 				var user User
-				if err := tx.Select("id, role").Where("id = ?", token.UserId).First(&user).Error; err == nil && IsAdmin(user.Id) {
+				if err := tx.Select("id, role").Where("id = ?", token.UserId).First(&user).Error; err == nil && user.Role >= common.RoleAdminUser {
+					if err := tx.Model(&Token{}).Where("id = ?", token.Id).Updates(map[string]any{"scope_exempt": true, "scope_assignment_required": false}).Error; err != nil {
+						return err
+					}
 					continue
 				}
 				var subs []UserSubscription

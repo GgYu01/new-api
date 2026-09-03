@@ -176,6 +176,8 @@ func TestPreConsumeSubscriptionUsesOnlyMatchingSubscriptionType(t *testing.T) {
 func TestBackfillSubscriptionTypesDefaultsLegacyRowsAndKeepsExplicitGrok(t *testing.T) {
 	truncateTables(t)
 	now := GetDBTimestamp()
+	require.NoError(t, DB.Create(&User{Id: 9709, Username: "legacy-admin", Password: "unused", Status: 1, Role: common.RoleAdminUser, Group: "default"}).Error)
+	require.NoError(t, DB.Create(&Token{Id: 9708, UserId: 9709, Key: "legacy-admin-key"}).Error)
 	require.NoError(t, DB.Create(&SubscriptionPlan{Id: 9710, Title: "legacy", TotalAmount: 100, SubscriptionType: ""}).Error)
 	require.NoError(t, DB.Create(&SubscriptionPlan{Id: 9711, Title: "grok", TotalAmount: 100, SubscriptionType: SubscriptionTypeGrok}).Error)
 	require.NoError(t, DB.Create(&UserSubscription{Id: 9712, UserId: 1, PlanId: 9710, AmountTotal: 100, EndTime: now + 3600, Status: "active", SubscriptionType: ""}).Error)
@@ -195,6 +197,9 @@ func TestBackfillSubscriptionTypesDefaultsLegacyRowsAndKeepsExplicitGrok(t *test
 	assert.Equal(t, SubscriptionTypeGPTOpenAICodex, legacyPlan.SubscriptionType)
 	assert.Equal(t, SubscriptionTypeGPTOpenAICodex, legacySub.SubscriptionType)
 	assert.Equal(t, SubscriptionTypeGrok, grokSub.SubscriptionType)
+	var adminToken Token
+	require.NoError(t, DB.First(&adminToken, 9708).Error)
+	assert.True(t, adminToken.ScopeExempt)
 }
 
 func TestWalletOverflowDecisionIsScopedToSelectedSubscription(t *testing.T) {
