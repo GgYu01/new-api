@@ -213,3 +213,24 @@ func TestWalletOverflowDecisionIsScopedToSelectedSubscription(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, gptAllowed)
 }
+
+func TestPreviewTokenScopeMigrationIsSecretFreeAndClassifiesActions(t *testing.T) {
+	truncateTables(t)
+	now := GetDBTimestamp()
+	require.NoError(t, DB.Create(&Token{Id: 9731, UserId: 9730, Key: "secret-must-not-be-read", SubscriptionType: SubscriptionTypeGrok}).Error)
+	require.NoError(t, DB.Create(&Token{Id: 9732, UserId: 9730, Key: "legacy-single"}).Error)
+	require.NoError(t, DB.Create(&Token{Id: 9733, UserId: 9731, Key: "legacy-ambiguous"}).Error)
+	require.NoError(t, DB.Create(&Token{Id: 9734, UserId: 9732, Key: "legacy-none"}).Error)
+	require.NoError(t, DB.Create(&Token{Id: 9735, UserId: 0, Key: "system", ScopeExempt: true}).Error)
+	require.NoError(t, DB.Create(&UserSubscription{Id: 9736, UserId: 9730, EndTime: now + 3600, Status: "active", SubscriptionType: SubscriptionTypeGrok}).Error)
+	require.NoError(t, DB.Create(&UserSubscription{Id: 9737, UserId: 9731, EndTime: now + 3600, Status: "active", SubscriptionType: SubscriptionTypeGrok}).Error)
+	require.NoError(t, DB.Create(&UserSubscription{Id: 9738, UserId: 9731, EndTime: now + 3600, Status: "active", SubscriptionType: SubscriptionTypeGPTOpenAICodex}).Error)
+
+	report, err := PreviewTokenScopeMigration()
+	require.NoError(t, err)
+	assert.Equal(t, 1, report.ExplicitGrok)
+	assert.Equal(t, 1, report.EmptySingleFamily)
+	assert.Equal(t, 1, report.EmptyAmbiguous)
+	assert.Equal(t, 1, report.EmptyNoFamily)
+	assert.Equal(t, 1, report.SystemExempt)
+}

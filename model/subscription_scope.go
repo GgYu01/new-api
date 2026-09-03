@@ -437,3 +437,64 @@ func BackfillSubscriptionTypes() error {
 		return nil
 	})
 }
+
+// TokenScopeMigrationReport is a secret-free preview of the legacy-key
+// migration. Counts are deliberately grouped by action, not by token value.
+type TokenScopeMigrationReport struct {
+	ExplicitGPT       int `json:"explicit_gpt"`
+	ExplicitGrok      int `json:"explicit_grok"`
+	EmptySingleFamily int `json:"empty_single_family"`
+	EmptyAmbiguous    int `json:"empty_ambiguous"`
+	EmptyNoFamily     int `json:"empty_no_family"`
+	SystemExempt      int `json:"system_exempt"`
+}
+
+// PreviewTokenScopeMigration performs the migration classification without
+// writing rows or exposing token secrets. It is suitable for an operator
+// dry-run before invoking BackfillSubscriptionTypes.
+func PreviewTokenScopeMigration() (TokenScopeMigrationReport, error) {
+	var report TokenScopeMigrationReport
+	if DB == nil {
+		return report, errors.New("database is not initialized")
+	}
+	var tokens []Token
+	if err := DB.Select("id, user_id, subscription_type, scope_exempt").Find(&tokens).Error; err != nil {
+		return report, err
+	}
+	now := common.GetTimestamp()
+	for _, token := range tokens {
+		if token.ScopeExempt {
+			report.SystemExempt++
+			continue
+		}
+		typ := strings.TrimSpace(token.SubscriptionType)
+		if typ != "" {
+			normalized, err := canonicalSubscriptionType(typ)
+			if err == nil && normalized == SubscriptionTypeGrok {
+				report.ExplicitGrok++
+			} else {
+				report.ExplicitGPT++
+			}
+			continue
+		}
+		var subs []UserSubscription
+		if err := DB.Select("subscription_type").Where("user_id = ? AND status = ? AND end_time > ?", token.UserId, "active", now).Find(&subs).Error; err != nil {
+			return report, err
+		}
+		families := map[string]struct{}{}
+		for _, sub := range subs {
+			if normalized, err := canonicalSubscriptionType(sub.SubscriptionType); err == nil {
+				families[normalized] = struct{}{}
+			}
+		}
+		switch len(families) {
+		case 1:
+			report.EmptySingleFamily++
+		case 0:
+			report.EmptyNoFamily++
+		default:
+			report.EmptyAmbiguous++
+		}
+	}
+	return report, nil
+}
