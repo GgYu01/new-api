@@ -456,6 +456,26 @@ func UpdateToken(c *gin.Context) {
 				common.ApiError(c, normalizeErr)
 				return
 			}
+			if !model.IsAdmin(userId) {
+				access, accessErr := service.SubscriptionAccessForRequest(c, userId)
+				if accessErr != nil {
+					common.ApiError(c, accessErr)
+					return
+				}
+				if access.Enforced {
+					allowed := false
+					for _, typ := range access.Types {
+						if typ == normalizedSubscriptionType {
+							allowed = true
+							break
+						}
+					}
+					if !allowed {
+						common.ApiError(c, model.ErrSubscriptionModelNotAllowed)
+						return
+					}
+				}
+			}
 			cleanToken.SubscriptionType = normalizedSubscriptionType
 		}
 		if token.ScopeExempt {
