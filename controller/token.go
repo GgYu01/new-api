@@ -33,12 +33,14 @@ func (input *tokenAutoGroupsInput) UnmarshalJSON(data []byte) error {
 
 type tokenRequest struct {
 	model.Token
-	AutoGroups tokenAutoGroupsInput `json:"auto_groups"`
+	AutoGroups       tokenAutoGroupsInput `json:"auto_groups"`
+	SubscriptionType *string              `json:"subscription_type"`
 }
 
 type tokenResponse struct {
 	*model.Token
-	AutoGroups []string `json:"auto_groups"`
+	AutoGroups       []string `json:"auto_groups"`
+	SubscriptionType string   `json:"subscription_type"`
 }
 
 func buildMaskedTokenResponse(token *model.Token) *tokenResponse {
@@ -55,7 +57,7 @@ func buildMaskedTokenResponse(token *model.Token) *tokenResponse {
 	if len(autoGroups) == 0 {
 		autoGroups = nil
 	}
-	return &tokenResponse{Token: &maskedToken, AutoGroups: autoGroups}
+	return &tokenResponse{Token: &maskedToken, AutoGroups: autoGroups, SubscriptionType: token.SubscriptionType}
 }
 
 func buildMaskedTokenResponses(tokens []*model.Token) []*tokenResponse {
@@ -256,6 +258,7 @@ func GetTokenUsage(c *gin.Context) {
 			"unlimited_quota":      token.UnlimitedQuota,
 			"model_limits":         token.GetModelLimitsMap(),
 			"model_limits_enabled": token.ModelLimitsEnabled,
+			"subscription_type":    token.SubscriptionType,
 			"expires_at":           expiredAt,
 		},
 	})
@@ -307,6 +310,39 @@ func AddToken(c *gin.Context) {
 		token.CrossGroupRetry = false
 		_ = token.SetAutoGroups(nil)
 	}
+	requestedSubscriptionType := token.SubscriptionType
+	if request.SubscriptionType != nil {
+		requestedSubscriptionType = *request.SubscriptionType
+	}
+	normalizedSubscriptionType, normalizeErr := model.NormalizeTokenSubscriptionType(requestedSubscriptionType)
+	if normalizeErr != nil {
+		common.ApiError(c, normalizeErr)
+		return
+	}
+	// A normal user key must be backed by an active subscription of the same
+	// model family.  Keep deployments without the subscription tables
+	// compatible during bootstrap; once scope enforcement is active, never
+	// create a key that would have no entitlement or silently widen access.
+	if !model.IsAdmin(c.GetInt("id")) {
+		access, accessErr := service.SubscriptionAccessForRequest(c, c.GetInt("id"))
+		if accessErr != nil {
+			common.ApiError(c, accessErr)
+			return
+		}
+		if access.Enforced {
+			allowed := false
+			for _, typ := range access.Types {
+				if typ == normalizedSubscriptionType {
+					allowed = true
+					break
+				}
+			}
+			if !allowed {
+				common.ApiError(c, model.ErrSubscriptionModelNotAllowed)
+				return
+			}
+		}
+	}
 	key, err := common.GenerateKey()
 	if err != nil {
 		common.ApiErrorI18n(c, i18n.MsgTokenGenerateFailed)
@@ -324,6 +360,7 @@ func AddToken(c *gin.Context) {
 		UnlimitedQuota:     token.UnlimitedQuota,
 		ModelLimitsEnabled: token.ModelLimitsEnabled,
 		ModelLimits:        token.ModelLimits,
+		SubscriptionType:   normalizedSubscriptionType,
 		AllowIps:           token.AllowIps,
 		Group:              token.Group,
 		CrossGroupRetry:    token.CrossGroupRetry,
@@ -404,6 +441,14 @@ func UpdateToken(c *gin.Context) {
 		cleanToken.UnlimitedQuota = token.UnlimitedQuota
 		cleanToken.ModelLimitsEnabled = token.ModelLimitsEnabled
 		cleanToken.ModelLimits = token.ModelLimits
+		if request.SubscriptionType != nil {
+			normalizedSubscriptionType, normalizeErr := model.NormalizeTokenSubscriptionType(*request.SubscriptionType)
+			if normalizeErr != nil {
+				common.ApiError(c, normalizeErr)
+				return
+			}
+			cleanToken.SubscriptionType = normalizedSubscriptionType
+		}
 		cleanToken.AllowIps = token.AllowIps
 		cleanToken.Group = token.Group
 		cleanToken.CrossGroupRetry = token.CrossGroupRetry
