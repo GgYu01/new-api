@@ -83,14 +83,14 @@ func detect(path string, payload map[string]any) (Intent, bool, error) {
 	clientModel := stringValue(payload["model"])
 	envelope := EnvelopeImages
 	imageRequest := strings.HasPrefix(normalizedPath, "/v1/images")
-	imageTool, hasImageTool := findImageTool(payload)
+	imageTool, hasImageTool := findSelectedImageTool(payload)
 	switch normalizedPath {
 	case "/v1/responses":
 		envelope = EnvelopeResponses
-		imageRequest = hasImageTool || isImageModel(clientModel)
+		imageRequest = hasImageTool || isImageModel(clientModel) || hasExplicitImageModality(payload)
 	case "/v1/chat/completions":
 		envelope = EnvelopeChat
-		imageRequest = hasImageTool || isImageModel(clientModel)
+		imageRequest = hasImageTool || isImageModel(clientModel) || hasExplicitImageModality(payload)
 	}
 	if !imageRequest {
 		return Intent{}, false, nil
@@ -163,12 +163,12 @@ func isOpenAIFamilyModel(model string) bool {
 		openAIFamilyModelPattern.MatchString(normalized)
 }
 
-func hasImageTool(payload map[string]any) bool {
-	_, ok := findImageTool(payload)
-	return ok
-}
-
-func findImageTool(payload map[string]any) (map[string]any, bool) {
+func findSelectedImageTool(payload map[string]any) (map[string]any, bool) {
+	// An available image_generation tool with tool_choice=auto belongs to the
+	// CPA text planner. Only an explicit selection is a direct C2A operation.
+	if !toolChoiceIsImage(payload["tool_choice"]) {
+		return nil, false
+	}
 	tools, _ := payload["tools"].([]any)
 	for _, tool := range tools {
 		if toolChoiceIsImage(tool) {
@@ -178,10 +178,20 @@ func findImageTool(payload map[string]any) (map[string]any, bool) {
 			return map[string]any{}, true
 		}
 	}
-	if toolChoiceIsImage(payload["tool_choice"]) {
-		return map[string]any{}, true
+	return map[string]any{}, true
+}
+
+func hasExplicitImageModality(payload map[string]any) bool {
+	modalities, ok := payload["modalities"].([]any)
+	if !ok {
+		return false
 	}
-	return nil, false
+	for _, modality := range modalities {
+		if strings.EqualFold(stringValue(modality), "image") {
+			return true
+		}
+	}
+	return false
 }
 
 func toolChoiceIsImage(value any) bool {

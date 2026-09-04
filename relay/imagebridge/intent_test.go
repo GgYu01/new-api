@@ -11,6 +11,7 @@ func TestDetectJSONResponsesImageToolWithoutModelUsesC2ADefault(t *testing.T) {
 	body := []byte(`{
 		"input":[{"role":"user","content":[{"type":"input_text","text":"draw a red fox"}]}],
 		"tools":[{"type":"image_generation","quality":"low"}],
+		"tool_choice":"image_generation",
 		"stream":true
 	}`)
 
@@ -31,7 +32,8 @@ func TestDetectJSONChatFunctionToolKeepsClientModelOnlyForResponseEnvelope(t *te
 	body := []byte(`{
 		"model":"gpt-5.6-sol",
 		"messages":[{"role":"user","content":"make a 16:9 blue poster"}],
-		"tools":[{"type":"function","function":{"name":"image_generation"}}]
+		"tools":[{"type":"function","function":{"name":"image_generation"}}],
+		"tool_choice":{"type":"function","function":{"name":"image_generation"}}
 	}`)
 
 	intent, ok, err := DetectJSON("/v1/chat/completions", body)
@@ -75,7 +77,7 @@ func TestDetectJSONExplicitForeignImageModelKeepsChannelSelectionModel(t *testin
 }
 
 func TestDetectJSONForeignGrokImageToolKeepsChannelSelectionModel(t *testing.T) {
-	body := []byte(`{"model":"grok-4.6","input":"draw a lighthouse","tools":[{"type":"image_generation"}]}`)
+	body := []byte(`{"model":"grok-4.6","input":"draw a lighthouse","tools":[{"type":"image_generation"}],"tool_choice":"image_generation"}`)
 
 	intent, ok, err := DetectJSON("/v1/responses", body)
 
@@ -136,7 +138,7 @@ func TestDetectJSONGenerationWithInputImageBecomesEdit(t *testing.T) {
 			{"type":"input_text","text":"turn this into a watercolor"},
 			{"type":"input_image","image_url":"data:image/png;base64,iVBORw0KGgo="}
 		]}],
-		"tools":[{"type":"image_generation"}]
+		"tools":[{"type":"image_generation"}],"tool_choice":"image_generation"
 	}`)
 
 	intent, ok, err := DetectJSON("/v1/responses", body)
@@ -164,7 +166,7 @@ func TestDetectJSONClampsCountAndFloorsQuality(t *testing.T) {
 func TestDetectJSONReadsImageParametersFromTool(t *testing.T) {
 	body := []byte(`{
 		"model":"gpt-5.6-sol","input":"draw a poster",
-		"tools":[{"type":"image_generation","n":3,"quality":"low","size":"9:16"}]
+		"tools":[{"type":"image_generation","n":3,"quality":"low","size":"9:16"}],"tool_choice":"image_generation"
 	}`)
 
 	intent, ok, err := DetectJSON("/v1/responses", body)
@@ -184,7 +186,7 @@ func TestRoutingBodyContainsOnlyTheSmallC2ASelectionPayload(t *testing.T) {
 			{"type":"input_text","text":"edit it"},
 			{"type":"input_image","image_url":"data:image/png;base64,iVBORw0KGgo="}
 		]}],
-		"tools":[{"type":"image_generation"}]
+		"tools":[{"type":"image_generation"}],"tool_choice":"image_generation"
 	}`)
 	intent, ok, err := DetectJSON("/v1/responses", body)
 	require.NoError(t, err)
@@ -195,4 +197,10 @@ func TestRoutingBodyContainsOnlyTheSmallC2ASelectionPayload(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, string(routingBody), `"model":"gpt-image-2"`)
 	assert.NotContains(t, string(routingBody), "iVBORw0KGgo")
+}
+
+func TestDetectJSONAvailableImageToolWithAutoChoiceStaysTextPlanner(t *testing.T) {
+	_, matched, err := DetectJSON("/v1/responses", []byte(`{"model":"gpt-5.6-sol","input":"write a caption","tools":[{"type":"image_generation"}],"tool_choice":"auto"}`))
+	require.NoError(t, err)
+	assert.False(t, matched)
 }

@@ -25,7 +25,7 @@ import (
 func TestDetectJSONReaderDoesNotRetainLargeImageString(t *testing.T) {
 	rawImage := append([]byte("\x89PNG\r\n\x1a\n"), bytes.Repeat([]byte{0x5a}, 4<<20)...)
 	encoded := base64.StdEncoding.EncodeToString(rawImage)
-	payload := []byte(`{"input":[{"role":"user","content":[{"type":"input_text","text":"edit it"},{"type":"input_image","image_url":"data:image/png;base64,` + encoded + `"}]}],"tools":[{"type":"image_generation"}]}`)
+	payload := []byte(`{"input":[{"role":"user","content":[{"type":"input_text","text":"edit it"},{"type":"input_image","image_url":"data:image/png;base64,` + encoded + `"}]}],"tools":[{"type":"image_generation"}],"tool_choice":"image_generation"}`)
 
 	intent, ok, err := DetectJSONReader("/v1/responses", bytes.NewReader(payload))
 
@@ -39,7 +39,7 @@ func TestDetectJSONReaderDoesNotRetainLargeImageString(t *testing.T) {
 
 func TestDetectJSONReaderRejectsOversizedPromptWithoutTailTruncation(t *testing.T) {
 	large := strings.Repeat("x", maxJSONPreviewBytes+1024)
-	payload := []byte(`{"input":[{"type":"input_text","text":"` + large + `"}],"model":"gpt-5.6-sol","tools":[{"type":"image_generation"}]}`)
+	payload := []byte(`{"input":[{"type":"input_text","text":"` + large + `"}],"model":"gpt-5.6-sol","tools":[{"type":"image_generation"}],"tool_choice":"image_generation"}`)
 
 	_, matched, err := DetectJSONReader("/v1/responses", bytes.NewReader(payload))
 
@@ -168,7 +168,7 @@ func TestWriteEnvelopeBuildsStreamingChatCompletion(t *testing.T) {
 func TestNativeBridgeFakeC2AEndToEnd(t *testing.T) {
 	rawImage := append([]byte("\x89PNG\r\n\x1a\n"), bytes.Repeat([]byte{0x27}, 1<<20)...)
 	encoded := base64.StdEncoding.EncodeToString(rawImage)
-	requestPayload := []byte(`{"model":"gpt-5.6-sol","input":[{"role":"user","content":[{"type":"input_text","text":"make it green"},{"type":"input_image","image_url":"data:image/png;base64,` + encoded + `"}]}],"tools":[{"type":"image_generation"}]}`)
+	requestPayload := []byte(`{"model":"gpt-5.6-sol","input":[{"role":"user","content":[{"type":"input_text","text":"make it green"},{"type":"input_image","image_url":"data:image/png;base64,` + encoded + `"}]}],"tools":[{"type":"image_generation"}],"tool_choice":"image_generation"}`)
 
 	upstreamSawImage := make(chan struct{}, 1)
 	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {

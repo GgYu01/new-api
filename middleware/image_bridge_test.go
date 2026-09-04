@@ -19,7 +19,7 @@ func TestDetectImageBridgeOverridesOnlyChannelSelectionModel(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	context, _ := gin.CreateTestContext(recorder)
 	context.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{
-		"input":"draw a fox","tools":[{"type":"image_generation"}],"stream":true
+		"input":"draw a fox","tools":[{"type":"image_generation"}],"tool_choice":"image_generation","stream":true
 	}`))
 	context.Request.Header.Set("Content-Type", "application/json")
 
@@ -103,7 +103,7 @@ func TestDetectImageBridgeUsesAcceptSSEWhenStreamIsOmitted(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	context, _ := gin.CreateTestContext(recorder)
 	context.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{
-		"input":"draw a fox","tools":[{"type":"image_generation"}]
+		"input":"draw a fox","tools":[{"type":"image_generation"}],"tool_choice":"image_generation"
 	}`))
 	context.Request.Header.Set("Content-Type", "application/json")
 	context.Request.Header.Set("Accept", "text/event-stream")
@@ -120,7 +120,7 @@ func TestDetectImageBridgeExplicitStreamFalseOverridesAcceptSSE(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	context, _ := gin.CreateTestContext(recorder)
 	context.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{
-		"input":"draw a fox","tools":[{"type":"image_generation"}],"stream":false
+		"input":"draw a fox","tools":[{"type":"image_generation"}],"tool_choice":"image_generation","stream":false
 	}`))
 	context.Request.Header.Set("Content-Type", "application/json")
 	context.Request.Header.Set("Accept", "text/event-stream")
