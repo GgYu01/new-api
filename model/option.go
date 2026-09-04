@@ -140,6 +140,14 @@ func InitOptionMap() {
 	common.OptionMap["ModelRequestRateLimitDurationMinutes"] = strconv.Itoa(setting.ModelRequestRateLimitDurationMinutes)
 	common.OptionMap["ModelRequestRateLimitSuccessCount"] = strconv.Itoa(setting.ModelRequestRateLimitSuccessCount)
 	common.OptionMap["ModelRequestRateLimitGroup"] = setting.ModelRequestRateLimitGroup2JSONString()
+	trafficCfg := common.DefaultTrafficControlConfig()
+	common.OptionMap[common.TrafficControlEnabledOption] = strconv.FormatBool(trafficCfg.Enabled)
+	common.OptionMap[common.TrafficControlModeOption] = string(trafficCfg.Mode)
+	common.OptionMap[common.TrafficControlGlobalRPMOption] = strconv.FormatInt(trafficCfg.GlobalRPM, 10)
+	common.OptionMap[common.TrafficControlBurstOption] = strconv.FormatInt(trafficCfg.Burst, 10)
+	common.OptionMap[common.TrafficControlMaxActiveOption] = strconv.FormatInt(trafficCfg.MaxActiveRequests, 10)
+	common.OptionMap[common.TrafficControlWaitingQueueOption] = strconv.FormatInt(trafficCfg.WaitingQueue, 10)
+	common.OptionMap[common.TrafficControlWaitingTimeoutMsOption] = strconv.FormatInt(trafficCfg.WaitingTimeoutMs, 10)
 	common.OptionMap["ModelRatio"] = ratio_setting.ModelRatio2JSONString()
 	common.OptionMap["ModelPrice"] = ratio_setting.ModelPrice2JSONString()
 	common.OptionMap["CacheRatio"] = ratio_setting.CacheRatio2JSONString()
@@ -282,6 +290,9 @@ func updateOptionMap(key string, value string) (err error) {
 	common.OptionMapRWMutex.Lock()
 	defer common.OptionMapRWMutex.Unlock()
 	common.OptionMap[key] = value
+	if err := common.ApplyTrafficControlOption(key, value); err != nil {
+		return err
+	}
 
 	// 检查是否是模型配置 - 使用更规范的方式处理
 	if handleConfigUpdate(key, value) {
