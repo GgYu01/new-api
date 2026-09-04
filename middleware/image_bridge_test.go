@@ -2,17 +2,36 @@ package middleware
 
 import (
 	"bytes"
+	"io"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/relay/imagebridge"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestDetectImageBridgeRewritesAutoImageToolForGPTPlanner(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	context, _ := gin.CreateTestContext(recorder)
+	context.Set("id", 1)
+	common.SetContextKey(context, constant.ContextKeyTokenSubscriptionType, "gptopenaicodex")
+	context.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-5.6-sol","input":"caption this","tools":[{"type":"image_generation"}],"tool_choice":"auto"}`))
+	context.Request.Header.Set("Content-Type", "application/json")
+
+	DetectImageBridge()(context)
+	rewritten, err := io.ReadAll(context.Request.Body)
+	require.NoError(t, err)
+	require.Contains(t, string(rewritten), imagebridge.PlannerImageToolName)
+	require.NotContains(t, string(rewritten), `"type":"image_generation"`)
+}
 
 func TestDetectImageBridgeOverridesOnlyChannelSelectionModel(t *testing.T) {
 	gin.SetMode(gin.TestMode)

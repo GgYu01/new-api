@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/relay/imagebridge"
 	"github.com/gin-gonic/gin"
 )
@@ -55,6 +56,24 @@ func DetectImageBridge() gin.HandlerFunc {
 				intent.Request.Stream = common.GetPointer(true)
 			}
 			imagebridge.SetContext(c, intent)
+		} else if common.GetContextKeyString(c, constant.ContextKeyTokenSubscriptionType) == "gptopenaicodex" && (path == "/v1/responses" || path == "/v1/chat/completions") {
+			// Mixed GPT requests stay on CPA, but the provider-native image tool
+			// must be private so CPA can plan without executing GPT image output.
+			_, _ = storage.Seek(0, io.SeekStart)
+			if raw, readErr := io.ReadAll(storage); readErr == nil {
+				if rewritten, changed, rewriteErr := imagebridge.RewriteAutoImageTool(raw); rewriteErr != nil {
+					abortWithOpenAiMessage(c, http.StatusBadRequest, fmt.Sprintf("invalid image planner request: %v", rewriteErr))
+					return
+				} else if changed {
+					oldStorage := storage
+					storage, err = common.CreateBodyStorage(rewritten)
+					if err != nil {
+						abortWithOpenAiMessage(c, http.StatusBadRequest, fmt.Sprintf("invalid image planner request: %v", err))
+						return
+					}
+					_ = oldStorage.Close()
+				}
+			}
 		}
 		if _, err := storage.Seek(0, io.SeekStart); err != nil {
 			abortWithOpenAiMessage(c, http.StatusBadRequest, fmt.Sprintf("invalid image bridge request: %v", err))
