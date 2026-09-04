@@ -2,6 +2,7 @@ package imagebridge
 
 import (
 	"bytes"
+	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
@@ -95,7 +96,10 @@ func detect(path string, payload map[string]any) (Intent, bool, error) {
 		return Intent{}, false, nil
 	}
 
-	prompt := extractPrompt(payload)
+	prompt, err := extractPrompt(payload)
+	if err != nil {
+		return Intent{}, false, err
+	}
 	imageCount := countInputImages(payload)
 	mode := ModeGeneration
 	if normalizedPath == "/v1/images/variations" {
@@ -210,9 +214,9 @@ func isImageModel(model string) bool {
 	return false
 }
 
-func extractPrompt(payload map[string]any) string {
+func extractPrompt(payload map[string]any) (string, error) {
 	if prompt := stringValue(payload["prompt"]); prompt != "" {
-		return trimPrompt(prompt)
+		return preservePrompt(prompt)
 	}
 	var chunks []string
 	collectUserText(payload["input"], &chunks, 0)
@@ -224,7 +228,7 @@ func extractPrompt(payload map[string]any) string {
 			chunks = append(chunks, instructions)
 		}
 	}
-	return trimPrompt(strings.Join(chunks, "\n"))
+	return preservePrompt(strings.Join(chunks, "\n"))
 }
 
 func collectUserText(value any, chunks *[]string, depth int) {
@@ -365,12 +369,15 @@ func inferSize(prompt string) string {
 	}
 }
 
-func trimPrompt(prompt string) string {
-	prompt = strings.Join(strings.Fields(prompt), " ")
-	if len(prompt) > maxPromptBytes {
-		prompt = prompt[len(prompt)-maxPromptBytes:]
+func preservePrompt(prompt string) (string, error) {
+	// Preserve caller whitespace and ordering. Silent strings.Fields flattening
+	// and tail truncation can change image semantics; reject oversized prompts
+	// with a bounded validation error instead.
+	prompt = strings.TrimSpace(prompt)
+	if len([]byte(prompt)) > maxPromptBytes {
+		return "", fmt.Errorf("image prompt exceeds %d bytes", maxPromptBytes)
 	}
-	return prompt
+	return prompt, nil
 }
 
 func stringValue(value any) string {

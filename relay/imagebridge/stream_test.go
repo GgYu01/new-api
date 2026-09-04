@@ -37,15 +37,15 @@ func TestDetectJSONReaderDoesNotRetainLargeImageString(t *testing.T) {
 	assert.Less(t, len(intent.InputImages[0].preview), 1<<16)
 }
 
-func TestDetectJSONReaderDoesNotTreatKeysAfterLargeValuesAsTruncated(t *testing.T) {
+func TestDetectJSONReaderRejectsOversizedPromptWithoutTailTruncation(t *testing.T) {
 	large := strings.Repeat("x", maxJSONPreviewBytes+1024)
 	payload := []byte(`{"input":[{"type":"input_text","text":"` + large + `"}],"model":"gpt-5.6-sol","tools":[{"type":"image_generation"}]}`)
 
-	intent, matched, err := DetectJSONReader("/v1/responses", bytes.NewReader(payload))
+	_, matched, err := DetectJSONReader("/v1/responses", bytes.NewReader(payload))
 
-	require.NoError(t, err)
-	require.True(t, matched)
-	assert.Equal(t, "gpt-5.6-sol", intent.ClientModel)
+	require.Error(t, err)
+	require.False(t, matched)
+	assert.Contains(t, err.Error(), "image prompt exceeds")
 }
 
 func TestDetectJSONReaderStillRejectsOversizedObjectKeys(t *testing.T) {
