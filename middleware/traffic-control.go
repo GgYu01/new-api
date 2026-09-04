@@ -14,7 +14,7 @@ import (
 // separate router and therefore intentionally does not pass through here.
 func GlobalTrafficControl() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if _, authenticated := c.Get("token_id"); !authenticated {
+		if _, authenticated := c.Get("id"); !authenticated {
 			c.Next()
 			return
 		}
