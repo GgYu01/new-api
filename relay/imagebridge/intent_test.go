@@ -204,3 +204,10 @@ func TestDetectJSONAvailableImageToolWithAutoChoiceStaysTextPlanner(t *testing.T
 	require.NoError(t, err)
 	assert.False(t, matched)
 }
+
+func TestDetectJSONExplicitImageModalityUsesC2A(t *testing.T) {
+	intent, matched, err := DetectJSON("/v1/responses", []byte(`{"model":"gpt-5.6-sol","input":"draw a badge","modalities":["text","image"]}`))
+	require.NoError(t, err)
+	require.True(t, matched)
+	assert.Equal(t, DefaultModel, intent.Request.Model)
+}
