@@ -62,3 +62,25 @@ func TestTrafficControlOptionsRejectQueueAndParseDefaults(t *testing.T) {
 	_, err = TrafficControlConfigFromOptions(map[string]string{TrafficControlWaitingQueueOption: "1"})
 	require.Error(t, err)
 }
+
+func TestTrafficControllerAccepts240ActiveAndRejects241stImmediately(t *testing.T) {
+	cfg := DefaultTrafficControlConfig()
+	cfg.GlobalRPM, cfg.Burst, cfg.MaxActiveRequests = 240, 240, 240
+	controller, err := NewTrafficController(cfg, time.Unix(0, 0))
+	require.NoError(t, err)
+	leases := make([]*TrafficLease, 0, 240)
+	for i := 0; i < 240; i++ {
+		lease, _, reason := controller.Admit(time.Unix(0, 0))
+		require.NotNil(t, lease)
+		require.Empty(t, reason)
+		leases = append(leases, lease)
+	}
+	rejected, retry, reason := controller.Admit(time.Unix(0, 0))
+	require.Nil(t, rejected)
+	require.Equal(t, time.Second, retry)
+	require.Equal(t, TrafficControlRejectActive, reason)
+	for _, lease := range leases {
+		lease.Release()
+	}
+	require.Zero(t, controller.Metrics().ActiveCurrent)
+}
