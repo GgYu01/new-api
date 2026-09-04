@@ -36,6 +36,7 @@ const (
 var (
 	ErrSubscriptionOrderNotFound      = errors.New("subscription order not found")
 	ErrSubscriptionOrderStatusInvalid = errors.New("subscription order status invalid")
+	ErrSubscriptionPlanOwnerMismatch  = errors.New("subscription plan is restricted to another user")
 )
 
 const (
@@ -184,6 +185,10 @@ type SubscriptionPlan struct {
 	// SubscriptionType limits which provider family may consume this plan.
 	// Empty values from legacy rows are migrated/defaulted to GPT/OpenAI/Codex.
 	SubscriptionType string `json:"subscription_type" gorm:"column:subscription_type;type:varchar(32);not null;default:'gptopenaicodex'"`
+
+	// OwnerUserId restricts an admin-assigned plan to one user when non-zero.
+	// Zero keeps legacy plans unrestricted.
+	OwnerUserId int `json:"owner_user_id" gorm:"column:owner_user_id;type:bigint;default:0;index"`
 
 	// Quota reset period for plan
 	QuotaResetPeriod        string `json:"quota_reset_period" gorm:"type:varchar(16);default:'never'"`
@@ -520,6 +525,9 @@ func CreateUserSubscriptionFromPlanTx(tx *gorm.DB, userId int, plan *Subscriptio
 		return nil, err
 	}
 	plan.SubscriptionType = typ
+	if plan.OwnerUserId > 0 && plan.OwnerUserId != userId {
+		return nil, ErrSubscriptionPlanOwnerMismatch
+	}
 	if plan.MaxPurchasePerUser > 0 {
 		var count int64
 		if err := tx.Model(&UserSubscription{}).

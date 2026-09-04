@@ -133,6 +133,32 @@ func TestCreateUserSubscriptionSnapshotsTypeFromPlan(t *testing.T) {
 	assert.Equal(t, SubscriptionTypeGrok, persisted.SubscriptionType)
 }
 
+func TestYellostarExclusivePlanRejectsNonOwner(t *testing.T) {
+	truncateTables(t)
+	ownerID := 9762
+	otherUserID := 9763
+	require.NoError(t, DB.Create(&User{Id: ownerID, Username: "yellostar-owner", Password: "unused", Status: 1, Group: "default", AffCode: "yellostar-owner-aff"}).Error)
+	require.NoError(t, DB.Create(&User{Id: otherUserID, Username: "other-user", Password: "unused", Status: 1, Group: "default", AffCode: "other-user-aff"}).Error)
+	plan := &SubscriptionPlan{
+		Id:               9764,
+		Title:            "Yellostar Grok Weekly $1875",
+		TotalAmount:      937500000,
+		SubscriptionType: SubscriptionTypeGrok,
+		OwnerUserId:      ownerID,
+	}
+	require.NoError(t, DB.Create(plan).Error)
+
+	_, err := CreateUserSubscriptionFromPlanTx(DB, otherUserID, plan, "test")
+	require.ErrorIs(t, err, ErrSubscriptionPlanOwnerMismatch)
+	var count int64
+	require.NoError(t, DB.Model(&UserSubscription{}).Where("plan_id = ?", plan.Id).Count(&count).Error)
+	assert.Zero(t, count)
+
+	subscription, err := CreateUserSubscriptionFromPlanTx(DB, ownerID, plan, "test")
+	require.NoError(t, err)
+	assert.Equal(t, ownerID, subscription.UserId)
+}
+
 func TestSubscriptionPlanMapUpdatePreservesGrokType(t *testing.T) {
 	truncateTables(t)
 	plan := &SubscriptionPlan{Id: 9751, Title: "Grok map update", TotalAmount: 100, SubscriptionType: SubscriptionTypeGrok}

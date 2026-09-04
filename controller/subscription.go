@@ -255,6 +255,17 @@ func AdminUpdateSubscriptionPlan(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
+	// Once a plan is owner-restricted, preserve that boundary even when older
+	// admin clients send a partial plan payload without owner_user_id. Do not
+	// allow the owner to be changed through the generic plan update endpoint.
+	if existingPlan.OwnerUserId > 0 {
+		if req.Plan.OwnerUserId == 0 {
+			req.Plan.OwnerUserId = existingPlan.OwnerUserId
+		} else if req.Plan.OwnerUserId != existingPlan.OwnerUserId {
+			common.ApiErrorMsg(c, "专属套餐归属用户不可变更")
+			return
+		}
+	}
 	// Older clients do not send subscription_type. Preserve an explicit Grok
 	// type in that case instead of silently converting the plan to GPT.
 	if strings.TrimSpace(req.Plan.SubscriptionType) == "" {
@@ -332,6 +343,7 @@ func AdminUpdateSubscriptionPlan(c *gin.Context) {
 			"max_purchase_per_user":      req.Plan.MaxPurchasePerUser,
 			"total_amount":               req.Plan.TotalAmount,
 			"subscription_type":          req.Plan.SubscriptionType,
+			"owner_user_id":              req.Plan.OwnerUserId,
 			"upgrade_group":              req.Plan.UpgradeGroup,
 			"downgrade_group":            req.Plan.DowngradeGroup,
 			"quota_reset_period":         req.Plan.QuotaResetPeriod,
