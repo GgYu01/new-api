@@ -1,6 +1,9 @@
 package imagebridge
 
-import "github.com/QuantumNous/new-api/common"
+import (
+	"github.com/QuantumNous/new-api/common"
+	"github.com/tidwall/gjson"
+)
 
 const PlannerImageToolName = "__newapi_generate_gpt_image"
 
@@ -10,11 +13,74 @@ const PlannerImageToolName = "__newapi_generate_gpt_image"
 // invoke it for an authenticated GPT request with tool_choice auto/omitted.
 // Chat Completions and Responses use different function-tool encodings, so the
 // rewrite follows the request envelope instead of reusing the Chat shape.
+//
+// The common case — a request without image tools — is decided with cheap
+// gjson probes; the full map decode/encode round-trip runs only when a
+// rewrite is actually needed.
 func RewriteAutoImageTool(body []byte) ([]byte, bool, error) {
 	return RewriteAutoImageToolForEnvelope(body, EnvelopeChat)
 }
 
+func rewriteNeeded(body []byte) bool {
+	if choice := gjson.GetBytes(body, "tool_choice"); choice.Exists() {
+		if text := choice.String(); choice.Type == gjson.String {
+			if text != "" && text != "auto" {
+				return false
+			}
+		} else if choice.IsObject() {
+			return false
+		}
+	}
+	tools := gjson.GetBytes(body, "tools")
+	if !tools.IsArray() {
+		return false
+	}
+	imageTool := false
+	tools.ForEach(func(_, item gjson.Result) bool {
+		toolType := item.Get("type")
+		if toolType.Type == gjson.String {
+			switch toolType.String() {
+			case "image_generation":
+				imageTool = true
+				return false
+			case "function":
+				if name, ok := functionToolNameGjson(item); ok && name == PlannerImageToolName {
+					imageTool = false
+					return false
+				}
+			}
+		} else if function := item.Get("function"); function.IsObject() {
+			if name := function.Get("name"); name.Type == gjson.String && name.String() == "image_generation" {
+				imageTool = true
+				return false
+			}
+			if name := function.Get("name"); name.Type == gjson.String && name.String() == PlannerImageToolName {
+				imageTool = false
+				return false
+			}
+		}
+		return true
+	})
+	return imageTool
+}
+
+func functionToolNameGjson(tool gjson.Result) (string, bool) {
+	if tool.Get("type").String() != "function" {
+		return "", false
+	}
+	if name := tool.Get("name"); name.Type == gjson.String && name.String() != "" {
+		return name.String(), true
+	}
+	if name := tool.Get("function.name"); name.Type == gjson.String && name.String() != "" {
+		return name.String(), true
+	}
+	return "", false
+}
+
 func RewriteAutoImageToolForEnvelope(body []byte, envelope Envelope) ([]byte, bool, error) {
+	if !rewriteNeeded(body) {
+		return body, false, nil
+	}
 	var payload map[string]any
 	if err := common.Unmarshal(body, &payload); err != nil {
 		return body, false, nil
