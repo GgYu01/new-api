@@ -8,7 +8,7 @@ the Free Software Foundation, either version 3 of the License, or
 */
 import { zodResolver } from '@hookform/resolvers/zod'
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { useForm } from 'react-hook-form'
+import { useForm, useFormState } from 'react-hook-form'
 import { useTranslation } from 'react-i18next'
 import { useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
@@ -61,6 +61,8 @@ export function TrafficControlSection({ defaultValues }: Props) {
   const [runtime, setRuntime] = useState<Runtime | null>(null)
   const revisionRef = useRef<number | null>(null)
   const form = useForm<FormInput, unknown, Values>({ resolver: zodResolver(schema), defaultValues })
+  const { isDirty } = useFormState({ control: form.control })
+  const appliedDefaultsRef = useRef<FormInput | null>(null)
 
   const refresh = useCallback(async () => {
     try {
@@ -88,11 +90,15 @@ export function TrafficControlSection({ defaultValues }: Props) {
   }, [form, queryClient])
 
   // Sync the form when the shared GET cache changes, but never overwrite
-  // edits the user has not submitted yet.
+  // edits the user has not submitted yet. Unchanged defaults (identity is
+  // unstable across renders) never trigger a reset.
   useEffect(() => {
-    if (!form.formState.isDirty) form.reset(defaultValues)
+    if (appliedDefaultsRef.current && JSON.stringify(appliedDefaultsRef.current) === JSON.stringify(defaultValues)) return
+    if (isDirty) return
+    appliedDefaultsRef.current = defaultValues
+    form.reset(defaultValues)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [defaultValues])
+  }, [defaultValues, isDirty])
 
   const onSubmit = async (values: Values) => {
     const payload = {
