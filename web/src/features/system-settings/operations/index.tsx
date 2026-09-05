@@ -57,7 +57,7 @@ const defaultOperationsSettings: OperationsSettings = {
   'perf_metrics_setting.bucket_time': 'hour',
   'perf_metrics_setting.retention_days': 0,
   TrafficControlEnabled: true,
-  TrafficControlMode: 'hybrid',
+  TrafficControlMode: 'concurrency',
   TrafficControlGlobalRPM: 240,
   TrafficControlBurst: 32,
   TrafficControlMaxActiveRequests: 240,

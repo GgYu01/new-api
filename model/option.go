@@ -193,6 +193,35 @@ func InitOptionMap() {
 
 	common.OptionMapRWMutex.Unlock()
 	loadOptionsFromDatabase()
+	migrateTrafficControlDefaults()
+}
+
+// migrateTrafficControlDefaults performs the one-time switch from the legacy
+// hybrid/240RPM/32Burst defaults to concurrency/240. It runs only when the
+// migration marker is absent and never rewrites admin-customized values; once
+// the marker exists, restarts, syncs and upgrades leave every value untouched.
+func migrateTrafficControlDefaults() {
+	common.OptionMapRWMutex.RLock()
+	marker := common.OptionMap[common.TrafficControlDefaultsMigratedOption]
+	mode := common.OptionMap[common.TrafficControlModeOption]
+	rpm := common.OptionMap[common.TrafficControlGlobalRPMOption]
+	burst := common.OptionMap[common.TrafficControlBurstOption]
+	maxActive := common.OptionMap[common.TrafficControlMaxActiveOption]
+	common.OptionMapRWMutex.RUnlock()
+	if marker == common.TrafficControlDefaultsMigratedValue {
+		return
+	}
+	legacyDefaults := mode == string(common.TrafficControlModeHybrid) && rpm == "240" && burst == "32" && maxActive == "240"
+	if legacyDefaults {
+		common.SysLog("traffic control migration: legacy hybrid/240RPM/32Burst defaults detected, switching to concurrency/240 (waiting_queue=0)")
+		if err := UpdateOption(common.TrafficControlModeOption, string(common.TrafficControlModeConcurrency)); err != nil {
+			common.SysLog("traffic control migration: failed to persist concurrency mode: " + err.Error())
+			return
+		}
+	}
+	if err := UpdateOption(common.TrafficControlDefaultsMigratedOption, common.TrafficControlDefaultsMigratedValue); err != nil {
+		common.SysLog("traffic control migration: failed to persist migration marker: " + err.Error())
+	}
 }
 
 func loadOptionsFromDatabase() {
@@ -272,6 +301,26 @@ func UpdateOptionsBulk(values map[string]string) error {
 	if err != nil {
 		return err
 	}
+	// Pre-apply traffic control keys into the OptionMap before dispatching the
+	// per-key updates. Every snapshot publish below then already sees the final
+	// combined config, so publish order cannot create invalid intermediate
+	// states and the first publish is the only state change.
+	trafficKeys := make([]string, 0, 8)
+	for k := range values {
+		switch k {
+		case common.TrafficControlEnabledOption, common.TrafficControlModeOption, common.TrafficControlGlobalRPMOption,
+			common.TrafficControlBurstOption, common.TrafficControlMaxActiveOption, common.TrafficControlWaitingQueueOption,
+			common.TrafficControlWaitingTimeoutMsOption:
+			trafficKeys = append(trafficKeys, k)
+		}
+	}
+	if len(trafficKeys) > 0 {
+		common.OptionMapRWMutex.Lock()
+		for _, k := range trafficKeys {
+			common.OptionMap[k] = values[k]
+		}
+		common.OptionMapRWMutex.Unlock()
+	}
 	for k, v := range values {
 		if err := updateOptionMap(k, v); err != nil {
 			return err
@@ -290,7 +339,10 @@ func updateOptionMap(key string, value string) (err error) {
 	common.OptionMapRWMutex.Lock()
 	defer common.OptionMapRWMutex.Unlock()
 	common.OptionMap[key] = value
-	if err := common.ApplyTrafficControlOption(key, value); err != nil {
+	// Publish the complete traffic control config from the current OptionMap
+	// snapshot. Same-value snapshots are no-ops, so every option write reaches
+	// the runtime through one full-config path instead of per-field deltas.
+	if err := common.ApplyTrafficControlFromOptions(common.SnapshotTrafficControlOptions(common.OptionMap)); err != nil {
 		return err
 	}
 
