@@ -269,3 +269,36 @@ func TestSnapshotTrafficControlOptionsFallsBackToDefaults(t *testing.T) {
 	require.Equal(t, int64(180), cfg.MaxActiveRequests)
 	require.Equal(t, TrafficControlModeConcurrency, cfg.Mode)
 }
+
+func TestTrafficControllerAccepts1000ActiveAndRejects1001stImmediately(t *testing.T) {
+	start := time.Unix(0, 0)
+	cfg := DefaultTrafficControlConfig()
+	cfg.MaxActiveRequests = 1000
+	controller, err := NewTrafficController(cfg, start)
+	require.NoError(t, err)
+
+	leases := make([]*TrafficLease, 1000)
+	for i := 0; i < 1000; i++ {
+		lease, _, reason := controller.Admit(start)
+		require.NotNil(t, lease, "request %d should be admitted", i+1)
+		require.Empty(t, reason)
+		leases[i] = lease
+	}
+	require.Equal(t, int64(1000), controller.Metrics().ActiveCurrent)
+
+	// 1001st must be rejected immediately with Active rejection
+	rejected, _, reason := controller.Admit(start)
+	require.Nil(t, rejected)
+	require.Equal(t, TrafficControlRejectActive, reason)
+
+	// Releasing all 1000 leases
+	for _, lease := range leases {
+		lease.Release()
+	}
+	require.Equal(t, int64(0), controller.Metrics().ActiveCurrent)
+
+	// Now a new request is admitted again
+	admitted, _, _ := controller.Admit(start)
+	require.NotNil(t, admitted)
+	admitted.Release()
+}
