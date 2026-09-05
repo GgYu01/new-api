@@ -3,6 +3,7 @@ package service
 import (
 	"time"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
 )
 
@@ -104,10 +105,19 @@ func (s *SubscriptionFunding) PreConsume(_ int) error {
 }
 
 func (s *SubscriptionFunding) Settle(delta int) error {
-	if delta == 0 {
-		return nil
+	if delta != 0 {
+		if err := model.PostConsumeUserSubscriptionDelta(s.subscriptionId, int64(delta)); err != nil {
+			return err
+		}
 	}
-	return model.PostConsumeUserSubscriptionDelta(s.subscriptionId, int64(delta))
+	// Mark the pre-consume record settled so the cleanup job knows the quota
+	// movement reached a terminal state. A marking failure must not fail the
+	// settle: the money change is already committed and the record stays
+	// "consumed", which the cleanup now preserves for recovery.
+	if err := model.MarkSubscriptionPreConsumeSettled(s.requestId); err != nil {
+		common.SysLog("error marking subscription pre-consume settled (requestId=" + s.requestId + "): " + err.Error())
+	}
+	return nil
 }
 
 func (s *SubscriptionFunding) Refund() error {

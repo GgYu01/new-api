@@ -1455,6 +1455,9 @@ func PreConsumeUserSubscription(requestId string, userId int, modelName string, 
 }
 
 // RefundSubscriptionPreConsume is idempotent and refunds pre-consumed subscription quota by requestId.
+// The quota adjustment and the refunded status transition commit in ONE
+// transaction: a partial failure (quota returned but record still consumed)
+// previously allowed a retry to refund twice.
 func RefundSubscriptionPreConsume(requestId string) error {
 	if strings.TrimSpace(requestId) == "" {
 		return errors.New("requestId is empty")
@@ -1472,12 +1475,37 @@ func RefundSubscriptionPreConsume(requestId string) error {
 			record.Status = "refunded"
 			return tx.Save(&record).Error
 		}
-		if err := PostConsumeUserSubscriptionDelta(record.UserSubscriptionId, -record.PreConsumed); err != nil {
+		if err := postConsumeUserSubscriptionDeltaTx(tx, record.UserSubscriptionId, -record.PreConsumed); err != nil {
 			return err
 		}
 		record.Status = "refunded"
 		return tx.Save(&record).Error
 	})
+}
+
+// MarkSubscriptionPreConsumeSettled transitions a consumed pre-consume record
+// to the terminal "settled" state after the subscription delta has been
+// committed. It never fails the caller's settle path: a marking problem leaves
+// the record as consumed, which the cleanup job now preserves for recovery.
+func MarkSubscriptionPreConsumeSettled(requestId string) error {
+	if strings.TrimSpace(requestId) == "" {
+		return errors.New("requestId is empty")
+	}
+	res := DB.Model(&SubscriptionPreConsumeRecord{}).
+		Where("request_id = ? AND status = ?", requestId, "consumed").
+		Update("status", "settled")
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		var record SubscriptionPreConsumeRecord
+		if err := DB.Where("request_id = ?", requestId).First(&record).Error; err != nil {
+			// No record for this request (legacy data or already cleaned).
+			return nil
+		}
+		// Already refunded or settled: keep the existing terminal state.
+	}
+	return nil
 }
 
 // ResetDueSubscriptions resets subscriptions whose next_reset_time has passed.
@@ -1523,13 +1551,16 @@ func ResetDueSubscriptions(limit int) (int, error) {
 	return resetCount, nil
 }
 
-// CleanupSubscriptionPreConsumeRecords removes old idempotency records to keep table small.
+// CleanupSubscriptionPreConsumeRecords removes old idempotency records to keep
+// the table small. Only terminal records (refunded/settled) are deleted;
+// consumed records may still hold un-recovered pre-consumed quota and must
+// never be silently discarded by age.
 func CleanupSubscriptionPreConsumeRecords(olderThanSeconds int64) (int64, error) {
 	if olderThanSeconds <= 0 {
 		olderThanSeconds = 7 * 24 * 3600
 	}
 	cutoff := GetDBTimestamp() - olderThanSeconds
-	res := DB.Where("updated_at < ?", cutoff).Delete(&SubscriptionPreConsumeRecord{})
+	res := DB.Where("updated_at < ? AND status IN ?", cutoff, []string{"refunded", "settled"}).Delete(&SubscriptionPreConsumeRecord{})
 	return res.RowsAffected, res.Error
 }
 
@@ -1569,6 +1600,9 @@ func GetSubscriptionPlanInfoByUserSubscriptionId(userSubscriptionId int) (*Subsc
 }
 
 // Update subscription used amount by delta (positive consume more, negative refund).
+// Public callers get their own transaction; code that already holds a
+// transaction must call postConsumeUserSubscriptionDeltaTx so quota changes
+// and idempotency status commit atomically together.
 func PostConsumeUserSubscriptionDelta(userSubscriptionId int, delta int64) error {
 	if userSubscriptionId <= 0 {
 		return errors.New("invalid userSubscriptionId")
@@ -1577,20 +1611,39 @@ func PostConsumeUserSubscriptionDelta(userSubscriptionId int, delta int64) error
 		return nil
 	}
 	return DB.Transaction(func(tx *gorm.DB) error {
-		var sub UserSubscription
-		if err := lockForUpdate(tx).
-			Where("id = ?", userSubscriptionId).
-			First(&sub).Error; err != nil {
-			return err
-		}
-		newUsed := sub.AmountUsed + delta
-		if newUsed < 0 {
-			newUsed = 0
-		}
-		if sub.AmountTotal > 0 && newUsed > sub.AmountTotal {
-			return fmt.Errorf("subscription used exceeds total, used=%d total=%d", newUsed, sub.AmountTotal)
-		}
-		sub.AmountUsed = newUsed
-		return tx.Save(&sub).Error
+		return postConsumeUserSubscriptionDeltaTx(tx, userSubscriptionId, delta)
 	})
+}
+
+func postConsumeUserSubscriptionDeltaTx(tx *gorm.DB, userSubscriptionId int, delta int64) error {
+	if tx == nil {
+		return errors.New("nil tx")
+	}
+	if userSubscriptionId <= 0 {
+		return errors.New("invalid userSubscriptionId")
+	}
+	if delta == 0 {
+		return nil
+	}
+	var sub UserSubscription
+	if err := lockForUpdate(tx).
+		Where("id = ?", userSubscriptionId).
+		First(&sub).Error; err != nil {
+		return err
+	}
+	newUsed := sub.AmountUsed + delta
+	if newUsed < 0 {
+		// A negative result is only reachable when the subscription quota was
+		// reset between pre-consume and refund (old period vs new period).
+		// Clamp instead of erroring so the refund still terminates, but log it:
+		// a silent clamp here must never mask a double refund, which is already
+		// prevented by the locked record status check.
+		common.SysLog(fmt.Sprintf("subscription refund clamped to zero (subscription=%d, used=%d, delta=%d), likely an old-period pre-consume refund after quota reset", userSubscriptionId, sub.AmountUsed, delta))
+		newUsed = 0
+	}
+	if sub.AmountTotal > 0 && newUsed > sub.AmountTotal {
+		return fmt.Errorf("subscription used exceeds total, used=%d total=%d", newUsed, sub.AmountTotal)
+	}
+	sub.AmountUsed = newUsed
+	return tx.Save(&sub).Error
 }
