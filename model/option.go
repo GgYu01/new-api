@@ -320,7 +320,12 @@ func UpdateTrafficControlAuthoritative(cfg common.TrafficControlConfig, expected
 
 	err := DB.Transaction(func(tx *gorm.DB) error {
 		var revOption Option
-		lockForUpdate(tx).Where("key = ?", common.TrafficControlRevisionOption).First(&revOption)
+		if err := tx.Where(Option{Key: common.TrafficControlRevisionOption}).FirstOrCreate(&revOption).Error; err != nil {
+			return err
+		}
+		if err := lockForUpdate(tx).Where("key = ?", common.TrafficControlRevisionOption).First(&revOption).Error; err != nil {
+			return err
+		}
 		var currentRevision uint64
 		if revOption.Value != "" {
 			if parsed, parseErr := strconv.ParseUint(strings.TrimSpace(revOption.Value), 10, 64); parseErr == nil {
@@ -368,10 +373,9 @@ func UpdateTrafficControlAuthoritative(cfg common.TrafficControlConfig, expected
 	}
 	common.OptionMapRWMutex.Unlock()
 
-	if err := common.SetTrafficControlConfig(cfg); err != nil {
+	if err := common.SetTrafficControlConfigWithRevision(cfg, newRevision); err != nil {
 		return common.GetTrafficControlMetrics(), err
 	}
-	common.SetTrafficControlPersistedRevision(newRevision)
 
 	return common.GetTrafficControlMetrics(), nil
 }

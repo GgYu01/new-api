@@ -1273,6 +1273,7 @@ type SubscriptionPreConsumeRecord struct {
 	UserId             int    `json:"user_id" gorm:"index"`
 	UserSubscriptionId int    `json:"user_subscription_id" gorm:"index"`
 	PreConsumed        int64  `json:"pre_consumed" gorm:"type:bigint;not null;default:0"`
+	ExtraReserved      int64  `json:"extra_reserved" gorm:"type:bigint;default:0"`
 	Status             string `json:"status" gorm:"type:varchar(32);index"` // consumed/settled/refunded
 	CreatedAt          int64  `json:"created_at" gorm:"bigint"`
 	UpdatedAt          int64  `json:"updated_at" gorm:"bigint;index"`
@@ -1467,6 +1468,24 @@ func PreConsumeUserSubscription(requestId string, userId int, modelName string, 
 	return returnValue, nil
 }
 
+// AddSubscriptionPreConsumeExtraReserved increments the extra reserved quota on a pre-consume record.
+func AddSubscriptionPreConsumeExtraReserved(requestId string, delta int64) error {
+	if strings.TrimSpace(requestId) == "" || delta == 0 {
+		return nil
+	}
+	return DB.Transaction(func(tx *gorm.DB) error {
+		var record SubscriptionPreConsumeRecord
+		if err := lockForUpdate(tx).Where("request_id = ?", requestId).First(&record).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil
+			}
+			return err
+		}
+		record.ExtraReserved += delta
+		return tx.Save(&record).Error
+	})
+}
+
 // RefundSubscriptionPreConsume is idempotent and refunds pre-consumed subscription quota by requestId.
 // The quota adjustment and the refunded status transition commit in ONE
 // transaction: a partial failure (quota returned but record still consumed)
@@ -1489,12 +1508,13 @@ func RefundSubscriptionPreConsume(requestId string) error {
 		if record.Status == "refunded" || record.Status == "settled" {
 			return nil
 		}
-		if record.PreConsumed <= 0 {
+		totalRefund := record.PreConsumed + record.ExtraReserved
+		if totalRefund <= 0 {
 			record.Status = "refunded"
 			return tx.Save(&record).Error
 		}
 		var sub UserSubscription
-		if err := tx.Where("id = ?", record.UserSubscriptionId).First(&sub).Error; err != nil {
+		if err := lockForUpdate(tx).Where("id = ?", record.UserSubscriptionId).First(&sub).Error; err != nil {
 			return err
 		}
 		if record.SubscriptionResetTime > 0 && sub.LastResetTime > record.SubscriptionResetTime {
@@ -1505,10 +1525,37 @@ func RefundSubscriptionPreConsume(requestId string) error {
 			record.Status = "refunded"
 			return tx.Save(&record).Error
 		}
-		if err := postConsumeUserSubscriptionDeltaTx(tx, record.UserSubscriptionId, -record.PreConsumed); err != nil {
+		if err := postConsumeUserSubscriptionDeltaTx(tx, record.UserSubscriptionId, -totalRefund); err != nil {
 			return err
 		}
 		record.Status = "refunded"
+		return tx.Save(&record).Error
+	})
+}
+
+// SettleSubscriptionPreConsume atomically commits the subscription delta and advances
+// the pre-consume record to "settled" in a single database transaction under lockForUpdate.
+func SettleSubscriptionPreConsume(requestId string, delta int64) error {
+	if strings.TrimSpace(requestId) == "" {
+		return errors.New("requestId is empty")
+	}
+	return DB.Transaction(func(tx *gorm.DB) error {
+		var record SubscriptionPreConsumeRecord
+		if err := lockForUpdate(tx).Where("request_id = ?", requestId).First(&record).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil
+			}
+			return err
+		}
+		if record.Status == "settled" || record.Status == "refunded" {
+			return nil
+		}
+		if delta != 0 && record.UserSubscriptionId > 0 {
+			if err := postConsumeUserSubscriptionDeltaTx(tx, record.UserSubscriptionId, delta); err != nil {
+				return err
+			}
+		}
+		record.Status = "settled"
 		return tx.Save(&record).Error
 	})
 }
@@ -1592,29 +1639,47 @@ func RecoverRequestedSubscriptionRefunds(olderThanSeconds int64, limit int) (int
 // classification instead of being bulk-settled or bulk-refunded.
 func ClassifySubscriptionPreConsumeRecords() (consumed, settled, refunded, pendingRefund, legacyWithoutEvidence int64, err error) {
 	type row struct {
-		Status            string
-		RefundRequestedAt int64
+		Id                    int
+		Status                string
+		RefundRequestedAt     int64
 		SubscriptionResetTime int64
 	}
-	var rows []row
-	if err = DB.Model(&SubscriptionPreConsumeRecord{}).
-		Select("status, refund_requested_at, subscription_reset_time").Find(&rows).Error; err != nil {
-		return
-	}
-	for _, r := range rows {
-		switch r.Status {
-		case "consumed":
-			consumed++
-			if r.RefundRequestedAt > 0 {
-				pendingRefund++
+	const batchSize = 1000
+	lastId := 0
+	for {
+		var rows []row
+		if err = DB.Model(&SubscriptionPreConsumeRecord{}).
+			Select("id, status, refund_requested_at, subscription_reset_time").
+			Where("id > ?", lastId).
+			Order("id asc").
+			Limit(batchSize).
+			Find(&rows).Error; err != nil {
+			return
+		}
+		if len(rows) == 0 {
+			break
+		}
+		for _, r := range rows {
+			switch r.Status {
+			case "consumed":
+				consumed++
+				if r.RefundRequestedAt > 0 {
+					pendingRefund++
+				}
+				if r.SubscriptionResetTime == 0 {
+					legacyWithoutEvidence++
+				}
+			case "settled":
+				settled++
+			case "refunded":
+				refunded++
 			}
-			if r.SubscriptionResetTime == 0 {
-				legacyWithoutEvidence++
+			if r.Id > lastId {
+				lastId = r.Id
 			}
-		case "settled":
-			settled++
-		case "refunded":
-			refunded++
+		}
+		if len(rows) < batchSize {
+			break
 		}
 	}
 	return
@@ -1664,16 +1729,41 @@ func ResetDueSubscriptions(limit int) (int, error) {
 }
 
 // CleanupSubscriptionPreConsumeRecords removes old idempotency records to keep
-// the table small. Only terminal records (refunded/settled) are deleted;
-// consumed records may still hold un-recovered pre-consumed quota and must
-// never be silently discarded by age.
+// the table small in bounded batches. Only terminal records (refunded/settled)
+// are deleted; consumed records may still hold un-recovered pre-consumed quota
+// and must never be silently discarded by age.
 func CleanupSubscriptionPreConsumeRecords(olderThanSeconds int64) (int64, error) {
 	if olderThanSeconds <= 0 {
 		olderThanSeconds = 7 * 24 * 3600
 	}
 	cutoff := GetDBTimestamp() - olderThanSeconds
-	res := DB.Where("updated_at < ? AND status IN ?", cutoff, []string{"refunded", "settled"}).Delete(&SubscriptionPreConsumeRecord{})
-	return res.RowsAffected, res.Error
+	const batchSize = 500
+	const maxBatches = 10
+	var totalDeleted int64
+
+	for i := 0; i < maxBatches; i++ {
+		var ids []int
+		err := DB.Model(&SubscriptionPreConsumeRecord{}).
+			Where("updated_at < ? AND status IN ?", cutoff, []string{"refunded", "settled"}).
+			Order("id asc").
+			Limit(batchSize).
+			Pluck("id", &ids).Error
+		if err != nil {
+			return totalDeleted, err
+		}
+		if len(ids) == 0 {
+			break
+		}
+		res := DB.Where("id IN ?", ids).Delete(&SubscriptionPreConsumeRecord{})
+		if res.Error != nil {
+			return totalDeleted, res.Error
+		}
+		totalDeleted += res.RowsAffected
+		if len(ids) < batchSize {
+			break
+		}
+	}
+	return totalDeleted, nil
 }
 
 type SubscriptionPlanInfo struct {

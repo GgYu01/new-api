@@ -97,14 +97,18 @@ func ClassifyRoute(req RouteRequest) (RouteResult, error) {
 
 func imageToolSelected(choice any) bool {
 	if text, ok := choice.(string); ok {
-		return strings.EqualFold(text, "image_generation")
+		return strings.EqualFold(text, "image_generation") || strings.EqualFold(text, "__newapi_generate_gpt_image")
 	}
 	if item, ok := choice.(map[string]any); ok {
-		if strings.EqualFold(fmt.Sprint(item["name"]), "image_generation") || strings.EqualFold(fmt.Sprint(item["type"]), "image_generation") {
+		name := fmt.Sprint(item["name"])
+		toolType := fmt.Sprint(item["type"])
+		if strings.EqualFold(name, "image_generation") || strings.EqualFold(name, "__newapi_generate_gpt_image") ||
+			strings.EqualFold(toolType, "image_generation") || strings.EqualFold(toolType, "__newapi_generate_gpt_image") {
 			return true
 		}
 		if fn, ok := item["function"].(map[string]any); ok {
-			return strings.EqualFold(fmt.Sprint(fn["name"]), "image_generation")
+			fnName := fmt.Sprint(fn["name"])
+			return strings.EqualFold(fnName, "image_generation") || strings.EqualFold(fnName, "__newapi_generate_gpt_image")
 		}
 	}
 	return false

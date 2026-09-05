@@ -45,7 +45,7 @@ type BillingSession struct {
 func (s *BillingSession) Settle(actualQuota int) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.settled {
+	if s.settled || s.refunded {
 		return nil
 	}
 	delta := actualQuota - s.preConsumedQuota
@@ -118,8 +118,10 @@ func (s *BillingSession) Refund(c *gin.Context) {
 			common.SysLog("error refunding billing source: " + err.Error())
 		}
 		if extraReserved > 0 && funding.Source() == BillingSourceSubscription && subscriptionId > 0 {
-			if err := model.PostConsumeUserSubscriptionDelta(subscriptionId, -int64(extraReserved)); err != nil {
-				common.SysLog("error refunding subscription extra reserved quota: " + err.Error())
+			if sub, ok := funding.(*SubscriptionFunding); !ok || sub.requestId == "" {
+				if err := model.PostConsumeUserSubscriptionDelta(subscriptionId, -int64(extraReserved)); err != nil {
+					common.SysLog("error refunding subscription extra reserved quota: " + err.Error())
+				}
 			}
 		}
 		// 2) 退还令牌额度
@@ -263,6 +265,9 @@ func (s *BillingSession) reserveFunding(delta int) error {
 				types.ErrOptionWithNoRecordErrorLog(),
 			)
 		}
+		if funding.requestId != "" {
+			_ = model.AddSubscriptionPreConsumeExtraReserved(funding.requestId, int64(delta))
+		}
 		return nil
 	default:
 		return types.NewError(fmt.Errorf("unsupported funding source: %s", s.funding.Source()), types.ErrorCodeUpdateDataError, types.ErrOptionWithSkipRetry())
@@ -280,6 +285,8 @@ func (s *BillingSession) rollbackFundingReserve(delta int) {
 	case *SubscriptionFunding:
 		if err := model.PostConsumeUserSubscriptionDelta(funding.subscriptionId, -int64(delta)); err != nil {
 			common.SysLog("error rolling back subscription funding reserve: " + err.Error())
+		} else if funding.requestId != "" {
+			_ = model.AddSubscriptionPreConsumeExtraReserved(funding.requestId, -int64(delta))
 		}
 	}
 }

@@ -196,16 +196,19 @@ func hasExplicitImageModality(payload map[string]any) bool {
 
 func toolChoiceIsImage(value any) bool {
 	if text := stringValue(value); text != "" {
-		return strings.EqualFold(text, "image_generation")
+		return strings.EqualFold(text, "image_generation") || strings.EqualFold(text, PlannerImageToolName)
 	}
 	switch item := value.(type) {
 	case map[string]any:
 		if strings.EqualFold(stringValue(item["type"]), "image_generation") ||
-			strings.EqualFold(stringValue(item["name"]), "image_generation") {
+			strings.EqualFold(stringValue(item["type"]), PlannerImageToolName) ||
+			strings.EqualFold(stringValue(item["name"]), "image_generation") ||
+			strings.EqualFold(stringValue(item["name"]), PlannerImageToolName) {
 			return true
 		}
 		if function, ok := item["function"].(map[string]any); ok {
-			return strings.EqualFold(stringValue(function["name"]), "image_generation")
+			return strings.EqualFold(stringValue(function["name"]), "image_generation") ||
+				strings.EqualFold(stringValue(function["name"]), PlannerImageToolName)
 		}
 	}
 	return false

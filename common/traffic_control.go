@@ -197,6 +197,35 @@ func (t *TrafficController) UpdateConfig(cfg TrafficControlConfig, now time.Time
 	return nil
 }
 
+// UpdateConfigWithRevision publishes a validated configuration along with an authoritative revision atomically.
+func (t *TrafficController) UpdateConfigWithRevision(cfg TrafficControlConfig, revision uint64, now time.Time) error {
+	if err := ValidateTrafficControlConfig(cfg); err != nil {
+		return err
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	old := t.cfg
+	if rpmEngaged(cfg.Mode) {
+		if rpmEngaged(old.Mode) && old.GlobalRPM > 0 && now.After(t.lastRefill) {
+			elapsed := now.Sub(t.lastRefill).Seconds()
+			t.tokens += elapsed * float64(old.GlobalRPM) / 60
+		}
+		t.cfg = cfg
+		if rpmEngaged(old.Mode) {
+			if t.tokens > float64(cfg.Burst) {
+				t.tokens = float64(cfg.Burst)
+			}
+		} else {
+			t.tokens = float64(cfg.Burst)
+		}
+	} else {
+		t.cfg = cfg
+	}
+	t.lastRefill = now
+	t.revision.Store(revision)
+	return nil
+}
+
 func (t *TrafficController) SetRevision(rev uint64) {
 	t.revision.Store(rev)
 }
@@ -336,6 +365,14 @@ func SetTrafficControlConfig(cfg TrafficControlConfig) error {
 	return globalTrafficController.UpdateConfig(cfg, time.Now())
 }
 
+func SetTrafficControlConfigWithRevision(cfg TrafficControlConfig, revision uint64) error {
+	trafficControlPersistedRevision.Store(revision)
+	if globalTrafficController != nil {
+		return globalTrafficController.UpdateConfigWithRevision(cfg, revision, time.Now())
+	}
+	return nil
+}
+
 // ApplyTrafficControlFromOptions publishes the complete traffic control config
 // derived from a full option snapshot. It is the single publish path shared by
 // startup, periodic sync, single-option writes and bulk writes; identical
@@ -345,15 +382,16 @@ func ApplyTrafficControlFromOptions(options map[string]string) error {
 	if err != nil {
 		return err
 	}
-	if err := SetTrafficControlConfig(cfg); err != nil {
-		return err
-	}
+	var rev uint64
 	if revStr, ok := options[TrafficControlRevisionOption]; ok {
-		if rev, parseErr := strconv.ParseUint(strings.TrimSpace(revStr), 10, 64); parseErr == nil {
-			SetTrafficControlPersistedRevision(rev)
+		if parsed, parseErr := strconv.ParseUint(strings.TrimSpace(revStr), 10, 64); parseErr == nil {
+			rev = parsed
 		}
 	}
-	return nil
+	if rev > 0 {
+		return SetTrafficControlConfigWithRevision(cfg, rev)
+	}
+	return SetTrafficControlConfig(cfg)
 }
 
 // SnapshotTrafficControlOptions extracts the traffic control option values from

@@ -60,25 +60,35 @@ export function TrafficControlSection({ defaultValues }: Props) {
   const queryClient = useQueryClient()
   const initialRevision = (defaultValues as Record<string, unknown>)?.TrafficControlRevision ? Number((defaultValues as Record<string, unknown>).TrafficControlRevision) : null
   const revisionRef = useRef<number | null>(initialRevision)
+  const [runtime, setRuntime] = useState<Runtime | null>(null)
   const form = useForm<FormInput, unknown, Values>({ resolver: zodResolver(schema), defaultValues })
   const { isDirty } = useFormState({ control: form.control })
   const appliedDefaultsRef = useRef<FormInput | null>(null)
+  const pollSeqRef = useRef<number>(0)
 
   const isDirtyRef = useRef(isDirty)
   useEffect(() => { isDirtyRef.current = isDirty }, [isDirty])
 
   const refresh = useCallback(async () => {
+    const currentSeq = ++pollSeqRef.current
     try {
       const response = await api.get('/api/option/traffic-control')
-      if (response.data.success) {
+      if (response.data.success && currentSeq >= pollSeqRef.current) {
         const data: Runtime = response.data.data
         setRuntime(data)
         if (!isDirtyRef.current) {
           revisionRef.current = data.revision
+          form.reset({
+            enabled: data.config.enabled,
+            mode: data.config.mode,
+            global_rpm: data.config.global_rpm,
+            burst: data.config.burst,
+            max_active_requests: data.config.max_active_requests,
+          })
         }
       }
     } catch { /* keep the last runtime snapshot */ }
-  }, [])
+  }, [form])
 
   // Low-frequency polling when visible with backoff on failure; stops when hidden or unmounted
   useEffect(() => {
@@ -92,13 +102,21 @@ export function TrafficControlSection({ defaultValues }: Props) {
         timer = setTimeout(poll, 5000)
         return
       }
+      const currentSeq = ++pollSeqRef.current
       try {
         const response = await api.get('/api/option/traffic-control')
-        if (!stopped && response.data.success) {
+        if (!stopped && response.data.success && currentSeq >= pollSeqRef.current) {
           const data: Runtime = response.data.data
           setRuntime(data)
           if (!isDirtyRef.current) {
             revisionRef.current = data.revision
+            form.reset({
+              enabled: data.config.enabled,
+              mode: data.config.mode,
+              global_rpm: data.config.global_rpm,
+              burst: data.config.burst,
+              max_active_requests: data.config.max_active_requests,
+            })
           }
           delay = 5000
         }
@@ -125,7 +143,7 @@ export function TrafficControlSection({ defaultValues }: Props) {
       if (timer) clearTimeout(timer)
       document.removeEventListener('visibilitychange', onVisibilityChange)
     }
-  }, [refresh])
+  }, [refresh, form])
 
   // Adopt server-returned config after a successful save so the form always
   // reflects the effective runtime values, then refresh the shared options
