@@ -32,13 +32,17 @@ func UpdateTrafficControl(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "invalid traffic control configuration"})
 		return
 	}
+	if err := common.ValidateTrafficControlConfig(req.TrafficControlConfig); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": err.Error()})
+		return
+	}
 	metrics, err := model.UpdateTrafficControlAuthoritative(req.TrafficControlConfig, req.Revision)
 	if err != nil {
 		if errors.Is(err, model.ErrTrafficControlConflict) {
 			c.JSON(http.StatusConflict, gin.H{"success": false, "message": "traffic control config was changed concurrently, reload and retry", "data": metrics})
 			return
 		}
-		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": err.Error()})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"success": true, "message": "", "data": metrics})

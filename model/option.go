@@ -320,7 +320,7 @@ func UpdateTrafficControlAuthoritative(cfg common.TrafficControlConfig, expected
 
 	err := DB.Transaction(func(tx *gorm.DB) error {
 		var revOption Option
-		tx.Where("key = ?", common.TrafficControlRevisionOption).First(&revOption)
+		lockForUpdate(tx).Where("key = ?", common.TrafficControlRevisionOption).First(&revOption)
 		var currentRevision uint64
 		if revOption.Value != "" {
 			if parsed, parseErr := strconv.ParseUint(strings.TrimSpace(revOption.Value), 10, 64); parseErr == nil {

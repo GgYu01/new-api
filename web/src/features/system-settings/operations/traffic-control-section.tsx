@@ -58,8 +58,8 @@ type Runtime = {
 export function TrafficControlSection({ defaultValues }: Props) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
-  const [runtime, setRuntime] = useState<Runtime | null>(null)
-  const revisionRef = useRef<number | null>(null)
+  const initialRevision = (defaultValues as Record<string, unknown>)?.TrafficControlRevision ? Number((defaultValues as Record<string, unknown>).TrafficControlRevision) : null
+  const revisionRef = useRef<number | null>(initialRevision)
   const form = useForm<FormInput, unknown, Values>({ resolver: zodResolver(schema), defaultValues })
   const { isDirty } = useFormState({ control: form.control })
   const appliedDefaultsRef = useRef<FormInput | null>(null)
@@ -167,13 +167,18 @@ export function TrafficControlSection({ defaultValues }: Props) {
       adoptServerConfig(response.data.data)
       toast.success(t('Traffic control updated'))
     } catch (error) {
-      const status = (error as { response?: { status?: number } })?.response?.status
+      const status = (error as { response?: { status?: number; data?: { data?: Runtime } } })?.response?.status
       if (status === 409) {
         toast.error(t('Config was changed elsewhere; the saved values have been reloaded.'))
-        try {
-          const response = await api.get('/api/option/traffic-control')
-          if (response.data.success) adoptServerConfig(response.data.data)
-        } catch { /* keep local edits visible */ }
+        const conflictData = (error as { response?: { data?: { data?: Runtime } } })?.response?.data?.data
+        if (conflictData) {
+          adoptServerConfig(conflictData)
+        } else {
+          try {
+            const response = await api.get('/api/option/traffic-control')
+            if (response.data.success) adoptServerConfig(response.data.data)
+          } catch { /* keep local edits visible */ }
+        }
         return
       }
       toast.error(error instanceof Error ? error.message : t('Failed to update setting'))
