@@ -1,0 +1,68 @@
+{
+  "comment": "Canonical per-model billing expressions for OpenAI models served through CPA. Coefficients are official $/1M token prices; the billingexpr engine converts rawCost/1e6*QuotaPerUnit to quota. p is prompt tokens net of cache sub-categories (the engine subtracts cr/cc when the expression references them); len is the full input context length used for tier selection. Apply with billing_setting.billing_mode=tiered_expr and billing_setting.billing_expr.",
+  "official_source": "https://developers.openai.com/api/docs/pricing (retrieved 2026-09-05)",
+  "tier_boundary_tokens": 272000,
+  "models": {
+    "gpt-6-astra": {
+      "long_context_supported": true,
+      "expr": "len <= 272000 ? tier(\"short\", p*10 + cr*1 + cc*12.5 + c*50) : tier(\"long\", p*20 + cr*2 + cc*25 + c*75)",
+      "official_prices_short": {"input": 10.0, "cache_read": 1.0, "cache_write": 12.5, "output": 50.0},
+      "official_prices_long": {"input": 20.0, "cache_read": 2.0, "cache_write": 25.0, "output": 75.0}
+    },
+    "gpt-5.6-sol": {
+      "long_context_supported": true,
+      "expr": "len <= 272000 ? tier(\"short\", p*4 + cr*0.4 + cc*5 + c*20) : tier(\"long\", p*8 + cr*0.8 + cc*10 + c*30)",
+      "official_prices_short": {"input": 4.0, "cache_read": 0.4, "cache_write": 5.0, "output": 20.0},
+      "official_prices_long": {"input": 8.0, "cache_read": 0.8, "cache_write": 10.0, "output": 30.0}
+    },
+    "gpt-5.6-terra": {
+      "long_context_supported": true,
+      "expr": "len <= 272000 ? tier(\"short\", p*2 + cr*0.2 + cc*2.5 + c*12) : tier(\"long\", p*4 + cr*0.4 + cc*5 + c*18)",
+      "official_prices_short": {"input": 2.0, "cache_read": 0.2, "cache_write": 2.5, "output": 12.0},
+      "official_prices_long": {"input": 4.0, "cache_read": 0.4, "cache_write": 5.0, "output": 18.0}
+    },
+    "gpt-5.6-luna": {
+      "long_context_supported": true,
+      "expr": "len <= 272000 ? tier(\"short\", p*0.2 + cr*0.02 + cc*0.25 + c*1.2) : tier(\"long\", p*0.4 + cr*0.04 + cc*0.5 + c*1.8)",
+      "official_prices_short": {"input": 0.2, "cache_read": 0.02, "cache_write": 0.25, "output": 1.2},
+      "official_prices_long": {"input": 0.4, "cache_read": 0.04, "cache_write": 0.5, "output": 1.8}
+    },
+    "gpt-5.5": {
+      "long_context_supported": true,
+      "expr": "len <= 272000 ? tier(\"short\", p*5 + cr*0.5 + cc*5 + c*30) : tier(\"long\", p*10 + cr*1 + cc*10 + c*45)",
+      "official_prices_short": {"input": 5.0, "cache_read": 0.5, "cache_write": null, "output": 30.0},
+      "official_prices_long": {"input": 10.0, "cache_read": 1.0, "cache_write": null, "output": 45.0},
+      "note": "cache_write not separately priced by OpenAI; cache-write tokens bill at the input price"
+    },
+    "gpt-5.4": {
+      "long_context_supported": true,
+      "expr": "len <= 272000 ? tier(\"short\", p*2.5 + cr*0.25 + cc*2.5 + c*15) : tier(\"long\", p*5 + cr*0.5 + cc*5 + c*22.5)",
+      "official_prices_short": {"input": 2.5, "cache_read": 0.25, "cache_write": null, "output": 15.0},
+      "official_prices_long": {"input": 5.0, "cache_read": 0.5, "cache_write": null, "output": 22.5},
+      "note": "cache_write not separately priced by OpenAI; cache-write tokens bill at the input price"
+    },
+    "gpt-5.4-mini": {
+      "long_context_supported": false,
+      "expr": "tier(\"standard\", p*0.75 + cr*0.075 + cc*0.75 + c*4.5)",
+      "official_prices_short": {"input": 0.75, "cache_read": 0.075, "cache_write": null, "output": 4.5},
+      "note": "272K max context; no long-context tier published"
+    },
+    "gpt-5.3-codex-spark": {
+      "long_context_supported": false,
+      "expr": "tier(\"standard\", p*1.75 + cr*0.175 + cc*1.75 + c*14)",
+      "official_prices_short": {"input": 1.75, "cache_read": 0.175, "cache_write": null, "output": 14.0},
+      "note": "OpenAI pricing page does not list spark separately; billed at the published gpt-5.3-codex rates. 128K max context."
+    },
+    "codex-auto-review": {
+      "long_context_supported": false,
+      "expr": "tier(\"standard\", p*1.75 + cr*0.175 + cc*1.75 + c*14)",
+      "official_prices_short": {"input": 1.75, "cache_read": 0.175, "cache_write": null, "output": 14.0},
+      "note": "ASSUMPTION: OpenAI does not publish standalone pricing for codex-auto-review; billed at the gpt-5.3-codex rates. Confirm with the operator."
+    }
+  },
+  "vectors": {
+    "short_plain": {"prompt_tokens": 100000, "completion_tokens": 1000, "cached_tokens": 0, "cache_creation_tokens": 0},
+    "short_cache": {"prompt_tokens": 160000, "completion_tokens": 1000, "cached_tokens": 50000, "cache_creation_tokens": 10000},
+    "long": {"prompt_tokens": 300000, "completion_tokens": 1000, "cached_tokens": 0, "cache_creation_tokens": 0}
+  }
+}
