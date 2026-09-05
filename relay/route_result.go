@@ -74,7 +74,22 @@ func ClassifyRoute(req RouteRequest) (RouteResult, error) {
 		return result, nil
 	}
 	result.ProviderFamily = ProviderOpenAICodex
-	imageOutput := strings.Contains(req.Endpoint, "/images/") || strings.HasPrefix(model, "gpt-image") || imageToolSelected(req.ToolChoice) || hasImageModality(req.Modalities)
+	if strings.Contains(req.Endpoint, "/audio/speech") {
+		result.OperationClass = OperationTTS
+		result.ExecutionBackend = BackendCPACodex
+		return result, nil
+	}
+	if strings.Contains(req.Endpoint, "/audio/") {
+		result.OperationClass = OperationSTT
+		result.ExecutionBackend = BackendCPACodex
+		return result, nil
+	}
+	if strings.Contains(req.Endpoint, "/realtime") {
+		result.OperationClass = OperationRealtime
+		result.ExecutionBackend = BackendCPACodex
+		return result, nil
+	}
+	imageOutput := strings.Contains(req.Endpoint, "/images/") || strings.Contains(req.Endpoint, "/edits") || strings.HasPrefix(model, "gpt-image") || imageToolSelected(req.ToolChoice) || hasImageModality(req.Modalities)
 	if imageOutput {
 		result.OperationClass, result.ExecutionBackend = OperationImageGenerate, BackendC2AImage
 		if strings.Contains(req.Endpoint, "/edits") {
