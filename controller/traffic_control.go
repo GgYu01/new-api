@@ -1,8 +1,8 @@
 package controller
 
 import (
+	"errors"
 	"net/http"
-	"strconv"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
@@ -23,41 +23,23 @@ func GetTrafficControl(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"success": true, "message": "", "data": common.GetTrafficControlMetrics()})
 }
 
-// UpdateTrafficControl persists the complete immutable policy in one option
-// transaction and publishes it without a restart. The response carries the
-// effective config and revision so the client can adopt the server truth.
+// UpdateTrafficControl persists the complete immutable policy via the
+// authoritative submit path and publishes it without a restart. The response
+// carries the effective config and revision so the client can adopt the server truth.
 func UpdateTrafficControl(c *gin.Context) {
 	var req trafficControlUpdateRequest
 	if err := common.DecodeJson(c.Request.Body, &req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "invalid traffic control configuration"})
 		return
 	}
-	cfg := req.TrafficControlConfig
-	if req.Revision != nil && *req.Revision != common.GetTrafficControlMetrics().Revision {
-		current := common.GetTrafficControlMetrics()
-		c.JSON(http.StatusConflict, gin.H{"success": false, "message": "traffic control config was changed concurrently, reload and retry", "data": current})
-		return
-	}
-	if err := common.ValidateTrafficControlConfig(cfg); err != nil {
+	metrics, err := model.UpdateTrafficControlAuthoritative(req.TrafficControlConfig, req.Revision)
+	if err != nil {
+		if errors.Is(err, model.ErrTrafficControlConflict) {
+			c.JSON(http.StatusConflict, gin.H{"success": false, "message": "traffic control config was changed concurrently, reload and retry", "data": metrics})
+			return
+		}
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": err.Error()})
 		return
 	}
-	values := map[string]string{
-		common.TrafficControlEnabledOption:          strconv.FormatBool(cfg.Enabled),
-		common.TrafficControlModeOption:             string(cfg.Mode),
-		common.TrafficControlGlobalRPMOption:        strconv.FormatInt(cfg.GlobalRPM, 10),
-		common.TrafficControlBurstOption:            strconv.FormatInt(cfg.Burst, 10),
-		common.TrafficControlMaxActiveOption:        strconv.FormatInt(cfg.MaxActiveRequests, 10),
-		common.TrafficControlWaitingQueueOption:     strconv.FormatInt(cfg.WaitingQueue, 10),
-		common.TrafficControlWaitingTimeoutMsOption: strconv.FormatInt(cfg.WaitingTimeoutMs, 10),
-	}
-	if err := model.UpdateOptionsBulk(values); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": err.Error()})
-		return
-	}
-	if err := common.SetTrafficControlConfig(cfg); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": err.Error()})
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"success": true, "message": "", "data": common.GetTrafficControlMetrics()})
+	c.JSON(http.StatusOK, gin.H{"success": true, "message": "", "data": metrics})
 }

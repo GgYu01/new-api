@@ -1,6 +1,7 @@
 package model
 
 import (
+	"errors"
 	"strconv"
 	"strings"
 	"time"
@@ -225,8 +226,36 @@ func migrateTrafficControlDefaults() {
 }
 
 func loadOptionsFromDatabase() {
-	options, _ := AllOption()
+	options, err := AllOption()
+	if err != nil {
+		common.SysLog("failed to load options from database: " + err.Error())
+		return
+	}
+	newOptions := make(map[string]string, len(options))
+	for _, opt := range options {
+		newOptions[opt.Key] = opt.Value
+	}
+	common.OptionMapRWMutex.Lock()
+	if common.OptionMap == nil {
+		common.OptionMap = make(map[string]string)
+	}
+	for k, v := range newOptions {
+		common.OptionMap[k] = v
+	}
+	trafficSnapshot := common.SnapshotTrafficControlOptions(common.OptionMap)
+	common.OptionMapRWMutex.Unlock()
+
+	if err := common.ApplyTrafficControlFromOptions(trafficSnapshot); err != nil {
+		common.SysLog("failed to apply traffic control from full options snapshot: " + err.Error())
+	}
+
 	for _, option := range options {
+		switch option.Key {
+		case common.TrafficControlEnabledOption, common.TrafficControlModeOption, common.TrafficControlGlobalRPMOption,
+			common.TrafficControlBurstOption, common.TrafficControlMaxActiveOption, common.TrafficControlWaitingQueueOption,
+			common.TrafficControlWaitingTimeoutMsOption, common.TrafficControlRevisionOption:
+			continue
+		}
 		err := updateOptionMap(option.Key, option.Value)
 		if err != nil {
 			common.SysLog("failed to update option map: " + err.Error())
@@ -261,14 +290,90 @@ func UpdateOption(key string, value string) error {
 		Key: key,
 	}
 	// https://gorm.io/docs/update.html#Save-All-Fields
-	DB.FirstOrCreate(&option, Option{Key: key})
+	if err := DB.FirstOrCreate(&option, Option{Key: key}).Error; err != nil {
+		return err
+	}
 	option.Value = value
 	// Save is a combination function.
 	// If save value does not contain primary key, it will execute Create,
 	// otherwise it will execute Update (with all fields).
-	DB.Save(&option)
+	if err := DB.Save(&option).Error; err != nil {
+		return err
+	}
 	// Update OptionMap
 	return updateOptionMap(key, value)
+}
+
+var ErrTrafficControlConflict = errors.New("traffic control config was changed concurrently, reload and retry")
+
+// UpdateTrafficControlAuthoritative is the authoritative path for traffic control
+// configuration. It compares the expected revision, writes all options including
+// the bumped revision in one database transaction, and updates the in-memory
+// OptionMap and runtime atomically without an interleaving window.
+func UpdateTrafficControlAuthoritative(cfg common.TrafficControlConfig, expectedRevision *uint64) (common.TrafficControlMetrics, error) {
+	if err := common.ValidateTrafficControlConfig(cfg); err != nil {
+		return common.TrafficControlMetrics{}, err
+	}
+
+	var newRevision uint64
+	var values map[string]string
+
+	err := DB.Transaction(func(tx *gorm.DB) error {
+		var revOption Option
+		tx.Where("key = ?", common.TrafficControlRevisionOption).First(&revOption)
+		var currentRevision uint64
+		if revOption.Value != "" {
+			if parsed, parseErr := strconv.ParseUint(strings.TrimSpace(revOption.Value), 10, 64); parseErr == nil {
+				currentRevision = parsed
+			}
+		}
+		if expectedRevision != nil && *expectedRevision != currentRevision {
+			return ErrTrafficControlConflict
+		}
+		newRevision = currentRevision + 1
+
+		values = map[string]string{
+			common.TrafficControlEnabledOption:          strconv.FormatBool(cfg.Enabled),
+			common.TrafficControlModeOption:             string(cfg.Mode),
+			common.TrafficControlGlobalRPMOption:        strconv.FormatInt(cfg.GlobalRPM, 10),
+			common.TrafficControlBurstOption:            strconv.FormatInt(cfg.Burst, 10),
+			common.TrafficControlMaxActiveOption:        strconv.FormatInt(cfg.MaxActiveRequests, 10),
+			common.TrafficControlWaitingQueueOption:     strconv.FormatInt(cfg.WaitingQueue, 10),
+			common.TrafficControlWaitingTimeoutMsOption: strconv.FormatInt(cfg.WaitingTimeoutMs, 10),
+			common.TrafficControlRevisionOption:         strconv.FormatUint(newRevision, 10),
+		}
+
+		for k, v := range values {
+			opt := Option{Key: k}
+			if err := tx.FirstOrCreate(&opt, Option{Key: k}).Error; err != nil {
+				return err
+			}
+			opt.Value = v
+			if err := tx.Save(&opt).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return common.GetTrafficControlMetrics(), err
+	}
+
+	common.OptionMapRWMutex.Lock()
+	if common.OptionMap == nil {
+		common.OptionMap = make(map[string]string)
+	}
+	for k, v := range values {
+		common.OptionMap[k] = v
+	}
+	common.OptionMapRWMutex.Unlock()
+
+	if err := common.SetTrafficControlConfig(cfg); err != nil {
+		return common.GetTrafficControlMetrics(), err
+	}
+	common.SetTrafficControlPersistedRevision(newRevision)
+
+	return common.GetTrafficControlMetrics(), nil
 }
 
 // UpdateOptionsBulk persists multiple key/value pairs in a single database

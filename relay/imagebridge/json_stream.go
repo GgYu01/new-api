@@ -2,11 +2,14 @@ package imagebridge
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
-	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf16"
+	"unicode/utf8"
 )
 
 const (
@@ -239,7 +242,7 @@ func (p *jsonStreamParser) parseObjectKey() (scannedString, error) {
 		}
 	}
 	rawLength := p.offset - start - 1
-	value, err := strconv.Unquote(`"` + string(raw) + `"`)
+	value, err := jsonUnquote(raw)
 	if err != nil {
 		return scannedString{}, fmt.Errorf("invalid JSON string: %w", err)
 	}
@@ -326,7 +329,7 @@ func (p *jsonStreamParser) parseString() (scannedString, error) {
 func decodeJSONStringPreview(raw []byte, truncated bool) (string, error) {
 	for trim := 0; trim <= 8 && trim <= len(raw); trim++ {
 		candidate := raw[:len(raw)-trim]
-		value, err := strconv.Unquote(`"` + string(candidate) + `"`)
+		value, err := jsonUnquote(candidate)
 		if err == nil {
 			return value, nil
 		}
@@ -338,6 +341,119 @@ func decodeJSONStringPreview(raw []byte, truncated bool) (string, error) {
 		return string(raw), nil
 	}
 	return "", fmt.Errorf("invalid JSON string")
+}
+
+// jsonUnquote decodes a JSON string token's raw bytes (quotes excluded) with
+// JSON string semantics. strconv.Unquote is not usable here: it implements Go
+// string-literal semantics, which reject legal JSON escapes such as \/ and
+// non-BMP surrogate pairs while accepting Go-only escapes (\xNN, \a, \v,
+// octal) that are invalid JSON. Behavior mirrors encoding/json exactly:
+// lone or partial surrogates decode to U+FFFD, invalid UTF-8 is replaced with
+// U+FFFD, and every non-JSON escape is an error. The no-escape fast path
+// avoids copying twice for the dominant unescaped case.
+func jsonUnquote(raw []byte) (string, error) {
+	if !bytes.ContainsRune(raw, '\\') {
+		if bytes.IndexByte(raw, '"') >= 0 {
+			return "", fmt.Errorf("unescaped quote in JSON string")
+		}
+		if utf8.Valid(raw) {
+			return string(raw), nil
+		}
+		return strings.ToValidUTF8(string(raw), string(utf8.RuneError)), nil
+	}
+	return jsonUnescape(raw)
+}
+
+func jsonUnescape(raw []byte) (string, error) {
+	decoded := make([]byte, 0, len(raw))
+	for i := 0; i < len(raw); {
+		c := raw[i]
+		if c != '\\' {
+			if c == '"' {
+				return "", fmt.Errorf("unescaped quote in JSON string")
+			}
+			if c < 0x20 {
+				return "", fmt.Errorf("unescaped control character in JSON string")
+			}
+			if c < utf8.RuneSelf {
+				decoded = append(decoded, c)
+				i++
+				continue
+			}
+			r, size := utf8.DecodeRune(raw[i:])
+			// DecodeRune returns (RuneError, 1) for invalid bytes; AppendRune
+			// then emits U+FFFD, matching encoding/json.
+			decoded = utf8.AppendRune(decoded, r)
+			i += size
+			continue
+		}
+		if i+1 >= len(raw) {
+			return "", fmt.Errorf("trailing escape in JSON string")
+		}
+		switch e := raw[i+1]; e {
+		case '"', '\\', '/':
+			decoded = append(decoded, e)
+			i += 2
+		case 'b':
+			decoded = append(decoded, '\b')
+			i += 2
+		case 'f':
+			decoded = append(decoded, '\f')
+			i += 2
+		case 'n':
+			decoded = append(decoded, '\n')
+			i += 2
+		case 'r':
+			decoded = append(decoded, '\r')
+			i += 2
+		case 't':
+			decoded = append(decoded, '\t')
+			i += 2
+		case 'u':
+			r, consumed, ok := jsonUnescapeUnicodeUnit(raw[i:])
+			if !ok {
+				return "", fmt.Errorf("invalid \\u escape in JSON string")
+			}
+			if utf16.IsSurrogate(rune(r)) {
+				if r2, consumed2, ok2 := jsonUnescapeUnicodeUnit(raw[i+consumed:]); ok2 && utf16.IsSurrogate(rune(r2)) {
+					if combined := utf16.DecodeRune(rune(r), rune(r2)); combined != unicode.ReplacementChar {
+						decoded = utf8.AppendRune(decoded, combined)
+						i += consumed + consumed2
+						continue
+					}
+				}
+				r = utf8.RuneError // lone surrogate decodes to U+FFFD
+			}
+			decoded = utf8.AppendRune(decoded, r)
+			i += consumed
+		default:
+			return "", fmt.Errorf("invalid escape \\%c in JSON string", e)
+		}
+	}
+	return string(decoded), nil
+}
+
+// jsonUnescapeUnicodeUnit decodes one leading \uXXXX escape, returning the raw
+// unit value and the consumed byte count. It requires exactly 4 hex digits,
+// like encoding/json's getu4.
+func jsonUnescapeUnicodeUnit(raw []byte) (rune, int, bool) {
+	if len(raw) < 6 || raw[0] != '\\' || raw[1] != 'u' {
+		return 0, 0, false
+	}
+	value := 0
+	for _, d := range raw[2:6] {
+		switch {
+		case d >= '0' && d <= '9':
+			value = value<<4 | int(d-'0')
+		case d >= 'a' && d <= 'f':
+			value = value<<4 | int(d-'a'+10)
+		case d >= 'A' && d <= 'F':
+			value = value<<4 | int(d-'A'+10)
+		default:
+			return 0, 0, false
+		}
+	}
+	return rune(value), 6, true
 }
 
 func (p *jsonStreamParser) parseLiteral(first byte) (any, error) {

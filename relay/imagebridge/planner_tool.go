@@ -21,6 +21,21 @@ func RewriteAutoImageTool(body []byte) ([]byte, bool, error) {
 	return RewriteAutoImageToolForEnvelope(body, EnvelopeChat)
 }
 
+// rewriteNeeded decides whether the auto-image rewrite applies, using only
+// cheap gjson probes. It must stay decision-identical to the map-based scan
+// in RewriteAutoImageToolForEnvelope (isImageTool + planner veto): the shared
+// contract is
+//
+//	plannerSeen = any tool where functionToolName == PlannerImageToolName
+//	              (type=="function", flat or nested name)
+//	              or function.name == PlannerImageToolName (any type)
+//	imageSeen   = any tool where type == "image_generation"
+//	              or function.name == "image_generation" (any type)
+//	              or type=="function" with flat name "image_generation"
+//
+// and the decision is imageSeen && !plannerSeen after the tool_choice guard.
+// The planner veto scans every tool, so the decision never depends on array
+// order.
 func rewriteNeeded(body []byte) bool {
 	if choice := gjson.GetBytes(body, "tool_choice"); choice.Exists() {
 		if text := choice.String(); choice.Type == gjson.String {
@@ -36,32 +51,35 @@ func rewriteNeeded(body []byte) bool {
 		return false
 	}
 	imageTool := false
+	plannerTool := false
 	tools.ForEach(func(_, item gjson.Result) bool {
-		toolType := item.Get("type")
-		if toolType.Type == gjson.String {
+		if toolType := item.Get("type"); toolType.Type == gjson.String {
 			switch toolType.String() {
 			case "image_generation":
 				imageTool = true
-				return false
 			case "function":
-				if name, ok := functionToolNameGjson(item); ok && name == PlannerImageToolName {
-					imageTool = false
-					return false
+				if name, ok := functionToolNameGjson(item); ok {
+					if name == PlannerImageToolName {
+						plannerTool = true
+					} else if name == "image_generation" {
+						imageTool = true
+					}
 				}
 			}
-		} else if function := item.Get("function"); function.IsObject() {
-			if name := function.Get("name"); name.Type == gjson.String && name.String() == "image_generation" {
-				imageTool = true
-				return false
-			}
-			if name := function.Get("name"); name.Type == gjson.String && name.String() == PlannerImageToolName {
-				imageTool = false
-				return false
+		}
+		if function := item.Get("function"); function.IsObject() {
+			if name := function.Get("name"); name.Type == gjson.String {
+				switch name.String() {
+				case PlannerImageToolName:
+					plannerTool = true
+				case "image_generation":
+					imageTool = true
+				}
 			}
 		}
-		return true
+		return !imageTool || !plannerTool
 	})
-	return imageTool
+	return imageTool && !plannerTool
 }
 
 func functionToolNameGjson(tool gjson.Result) (string, bool) {
@@ -100,10 +118,18 @@ func RewriteAutoImageToolForEnvelope(body []byte, envelope Envelope) ([]byte, bo
 	}
 	// Never introduce a second definition of the private planner function: a
 	// client-defined function with the same name would make the tool call
-	// target ambiguous.
+	// target ambiguous. Mirrors the planner veto in rewriteNeeded, including
+	// function-object tools without a "type" field.
 	for _, raw := range tools {
 		if name, ok := functionToolName(raw); ok && name == PlannerImageToolName {
 			return body, false, nil
+		}
+		if function, ok := raw.(map[string]any); ok {
+			if fn, ok := function["function"].(map[string]any); ok {
+				if name, ok := fn["name"].(string); ok && name == PlannerImageToolName {
+					return body, false, nil
+				}
+			}
 		}
 	}
 	rewritten := false
@@ -172,6 +198,10 @@ func isImageTool(tool map[string]any) bool {
 		if name, ok := function["name"].(string); ok && name == "image_generation" {
 			return true
 		}
+	}
+	// Flat Responses-style encoding: {"type":"function","name":"..."}.
+	if name, ok := functionToolName(tool); ok && name == "image_generation" {
+		return true
 	}
 	return false
 }

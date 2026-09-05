@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,6 +12,56 @@ import (
 	"github.com/QuantumNous/new-api/relay/imagebridge"
 	"github.com/gin-gonic/gin"
 )
+
+// containsFoldASCII checks whether b contains substr case-insensitively for ASCII characters.
+func containsFoldASCII(b []byte, sub string) bool {
+	if len(sub) == 0 {
+		return true
+	}
+	if len(b) < len(sub) {
+		return false
+	}
+	firstLower := byte(sub[0])
+	if firstLower >= 'A' && firstLower <= 'Z' {
+		firstLower += 'a' - 'A'
+	}
+	firstUpper := firstLower
+	if firstLower >= 'a' && firstLower <= 'z' {
+		firstUpper -= 'a' - 'A'
+	}
+	subLen := len(sub)
+	maxI := len(b) - subLen
+	for i := 0; i <= maxI; i++ {
+		c := b[i]
+		if c == firstLower || c == firstUpper {
+			match := true
+			for j := 1; j < subLen; j++ {
+				cb := b[i+j]
+				if cb >= 'A' && cb <= 'Z' {
+					cb += 'a' - 'A'
+				}
+				sb := byte(sub[j])
+				if sb >= 'A' && sb <= 'Z' {
+					sb += 'a' - 'A'
+				}
+				if cb != sb {
+					match = false
+					break
+				}
+			}
+			if match {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func mayContainImageIntent(raw []byte) bool {
+	return containsFoldASCII(raw, "image") ||
+		containsFoldASCII(raw, "dall") ||
+		containsFoldASCII(raw, "banana")
+}
 
 // DetectImageBridge identifies public OpenAI-compatible image requests before
 // channel distribution. It stores only the compact routing intent; the
@@ -40,15 +91,34 @@ func DetectImageBridge() gin.HandlerFunc {
 		}
 		var intent imagebridge.Intent
 		var matched bool
+		var raw []byte
 		if inspectMultipart {
 			intent, matched, err = imagebridge.DetectMultipart(c.Request.URL.Path, storage, c.GetHeader("Content-Type"))
+			if err != nil {
+				abortWithOpenAiMessage(c, http.StatusBadRequest, err.Error())
+				return
+			}
 		} else {
-			intent, matched, err = imagebridge.DetectJSONReader(c.Request.URL.Path, storage)
+			var readErr error
+			raw, readErr = storage.Bytes()
+			if readErr != nil {
+				abortWithOpenAiMessage(c, http.StatusBadRequest, fmt.Sprintf("invalid image bridge request: %v", readErr))
+				return
+			}
+
+			// Fast-path bypass: for /v1/chat/completions and /v1/responses, if the
+			// body does not contain any image model prefixes, image tool names, or
+			// image modality keywords, it cannot be an image request and does not
+			// need AST parsing.
+			if isImagesPath || mayContainImageIntent(raw) {
+				intent, matched, err = imagebridge.DetectJSONReader(c.Request.URL.Path, storage)
+				if err != nil {
+					abortWithOpenAiMessage(c, http.StatusBadRequest, err.Error())
+					return
+				}
+			}
 		}
-		if err != nil {
-			abortWithOpenAiMessage(c, http.StatusBadRequest, err.Error())
-			return
-		}
+
 		if matched {
 			if !intent.StreamSet && intent.Envelope != imagebridge.EnvelopeImages &&
 				strings.Contains(strings.ToLower(c.GetHeader("Accept")), "text/event-stream") {
@@ -56,11 +126,10 @@ func DetectImageBridge() gin.HandlerFunc {
 				intent.Request.Stream = common.GetPointer(true)
 			}
 			imagebridge.SetContext(c, intent)
-		} else if common.GetContextKeyString(c, constant.ContextKeyTokenSubscriptionType) == "gptopenaicodex" && (path == "/v1/responses" || path == "/v1/chat/completions") {
+		} else if !inspectMultipart && common.GetContextKeyString(c, constant.ContextKeyTokenSubscriptionType) == "gptopenaicodex" && (path == "/v1/responses" || path == "/v1/chat/completions") {
 			// Mixed GPT requests stay on CPA, but the provider-native image tool
 			// must be private so CPA can plan without executing GPT image output.
-			_, _ = storage.Seek(0, io.SeekStart)
-			if raw, readErr := io.ReadAll(storage); readErr == nil {
+			if bytes.Contains(raw, []byte(`"tools"`)) && containsFoldASCII(raw, "image") {
 				envelope := imagebridge.EnvelopeChat
 				if path == "/v1/responses" {
 					envelope = imagebridge.EnvelopeResponses
@@ -70,10 +139,7 @@ func DetectImageBridge() gin.HandlerFunc {
 					return
 				} else if changed {
 					// One-shot ownership transfer: publish the new storage in the
-					// context and request first, then release the old owner. The
-					// previous order (close old, context still holding the closed
-					// storage) made every later GetBodyStorage fail with
-					// "body storage is closed".
+					// context and request first, then release the old owner.
 					newStorage, createErr := common.CreateBodyStorage(rewritten)
 					if createErr != nil {
 						abortWithOpenAiMessage(c, http.StatusBadRequest, fmt.Sprintf("invalid image planner request: %v", createErr))

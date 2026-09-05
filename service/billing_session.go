@@ -39,6 +39,9 @@ type BillingSession struct {
 // Settle 根据实际消耗额度进行结算。
 // 资金来源和令牌额度分两步提交：若资金来源已提交但令牌调整失败，
 // 会标记 fundingSettled 防止 Refund 对已提交的资金来源执行退款。
+// 实际额度等于预扣额度（delta==0）时资金来源结算仍必须执行：钱包没有
+// 预扣记录无需操作，但订阅必须把预扣记录推进到 settled 终态，否则该
+// 记录永远停留在 consumed。
 func (s *BillingSession) Settle(actualQuota int) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -46,11 +49,8 @@ func (s *BillingSession) Settle(actualQuota int) error {
 		return nil
 	}
 	delta := actualQuota - s.preConsumedQuota
-	if delta == 0 {
-		s.settled = true
-		return nil
-	}
-	// 1) 调整资金来源（仅在尚未提交时执行，防止重复调用）
+	// 1) 调整资金来源（仅在尚未提交时执行，防止重复调用）。delta==0 也调用，
+	// 让订阅资金来源写入数据库终态（标记 settled）；钱包对 0 差额是 no-op。
 	if !s.fundingSettled {
 		if err := s.funding.Settle(delta); err != nil {
 			return err
@@ -59,7 +59,7 @@ func (s *BillingSession) Settle(actualQuota int) error {
 	}
 	// 2) 调整令牌额度
 	var tokenErr error
-	if !s.relayInfo.IsPlayground {
+	if delta != 0 && !s.relayInfo.IsPlayground {
 		if delta > 0 {
 			tokenErr = model.DecreaseTokenQuota(s.relayInfo.TokenId, s.relayInfo.TokenKey, delta)
 		} else {
@@ -72,7 +72,7 @@ func (s *BillingSession) Settle(actualQuota int) error {
 		}
 	}
 	// 3) 更新 relayInfo 上的订阅 PostDelta（用于日志）
-	if s.funding.Source() == BillingSourceSubscription {
+	if delta != 0 && s.funding.Source() == BillingSourceSubscription {
 		s.relayInfo.SubscriptionPostDelta += int64(delta)
 	}
 	s.settled = true
@@ -88,6 +88,14 @@ func (s *BillingSession) Refund(c *gin.Context) {
 	}
 	s.refunded = true
 	s.mu.Unlock()
+
+	// 持久化退款意图：这是崩溃恢复的依据。同步写入（尽力而为，失败仅记录
+	// 日志），随后的异步退款失败时，维护任务的恢复清扫仍能凭该标记重试。
+	if sub, ok := s.funding.(*SubscriptionFunding); ok && sub.requestId != "" {
+		if err := model.MarkSubscriptionPreConsumeRefundRequested(sub.requestId); err != nil {
+			common.SysLog("error marking subscription refund requested (requestId=" + sub.requestId + "): " + err.Error())
+		}
+	}
 
 	logger.LogInfo(c, fmt.Sprintf("用户 %d 请求失败, 返还预扣费（token_quota=%s, funding=%s）",
 		s.relayInfo.UserId,

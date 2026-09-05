@@ -1273,9 +1273,21 @@ type SubscriptionPreConsumeRecord struct {
 	UserId             int    `json:"user_id" gorm:"index"`
 	UserSubscriptionId int    `json:"user_subscription_id" gorm:"index"`
 	PreConsumed        int64  `json:"pre_consumed" gorm:"type:bigint;not null;default:0"`
-	Status             string `json:"status" gorm:"type:varchar(32);index"` // consumed/refunded
+	Status             string `json:"status" gorm:"type:varchar(32);index"` // consumed/settled/refunded
 	CreatedAt          int64  `json:"created_at" gorm:"bigint"`
 	UpdatedAt          int64  `json:"updated_at" gorm:"bigint;index"`
+	// SubscriptionResetTime snapshots UserSubscription.LastResetTime when the
+	// reservation was created. A refund whose record predates the
+	// subscription's current LastResetTime belongs to a previous quota period:
+	// the reset already wiped that period's usage, so the refund must not
+	// adjust AmountUsed. Zero means a legacy row created before this column
+	// existed; legacy rows keep the clamp fallback.
+	SubscriptionResetTime int64 `json:"subscription_reset_time" gorm:"type:bigint;default:0"`
+	// RefundRequestedAt is the persistent basis for refund retries and crash
+	// recovery: it is set synchronously when a refund is requested, before the
+	// asynchronous refund goroutine runs. The recovery sweep retries records
+	// with this marker still in "consumed". Zero means no refund was requested.
+	RefundRequestedAt int64 `json:"refund_requested_at" gorm:"type:bigint;default:0"`
 }
 
 func (r *SubscriptionPreConsumeRecord) BeforeCreate(tx *gorm.DB) error {
@@ -1411,11 +1423,12 @@ func PreConsumeUserSubscription(requestId string, userId int, modelName string, 
 				}
 			}
 			record := &SubscriptionPreConsumeRecord{
-				RequestId:          requestId,
-				UserId:             userId,
-				UserSubscriptionId: sub.Id,
-				PreConsumed:        amount,
-				Status:             "consumed",
+				RequestId:             requestId,
+				UserId:                userId,
+				UserSubscriptionId:    sub.Id,
+				PreConsumed:           amount,
+				Status:                "consumed",
+				SubscriptionResetTime: sub.LastResetTime,
 			}
 			if err := tx.Create(record).Error; err != nil {
 				var dup SubscriptionPreConsumeRecord
@@ -1457,7 +1470,12 @@ func PreConsumeUserSubscription(requestId string, userId int, modelName string, 
 // RefundSubscriptionPreConsume is idempotent and refunds pre-consumed subscription quota by requestId.
 // The quota adjustment and the refunded status transition commit in ONE
 // transaction: a partial failure (quota returned but record still consumed)
-// previously allowed a retry to refund twice.
+// previously allowed a retry to refund twice. Settled is terminal — a settled
+// reservation was already converted into consumption and must never be
+// refunded by a late retry. Refunds whose record predates the subscription's
+// current quota period (record.SubscriptionResetTime older than
+// sub.LastResetTime) skip the quota adjustment: the reset wiped the old
+// period's usage and the refund must not erase new-period consumption.
 func RefundSubscriptionPreConsume(requestId string) error {
 	if strings.TrimSpace(requestId) == "" {
 		return errors.New("requestId is empty")
@@ -1468,10 +1486,22 @@ func RefundSubscriptionPreConsume(requestId string) error {
 			Where("request_id = ?", requestId).First(&record).Error; err != nil {
 			return err
 		}
-		if record.Status == "refunded" {
+		if record.Status == "refunded" || record.Status == "settled" {
 			return nil
 		}
 		if record.PreConsumed <= 0 {
+			record.Status = "refunded"
+			return tx.Save(&record).Error
+		}
+		var sub UserSubscription
+		if err := tx.Where("id = ?", record.UserSubscriptionId).First(&sub).Error; err != nil {
+			return err
+		}
+		if record.SubscriptionResetTime > 0 && sub.LastResetTime > record.SubscriptionResetTime {
+			// The reservation belongs to a quota period that has since been
+			// reset. Do not touch AmountUsed (new-period usage must survive);
+			// only advance the record to its terminal state.
+			common.SysLog(fmt.Sprintf("subscription refund skips quota adjustment across period reset (request=%s, subscription=%d, record_reset=%d, current_reset=%d)", record.RequestId, record.UserSubscriptionId, record.SubscriptionResetTime, sub.LastResetTime))
 			record.Status = "refunded"
 			return tx.Save(&record).Error
 		}
@@ -1506,6 +1536,88 @@ func MarkSubscriptionPreConsumeSettled(requestId string) error {
 		// Already refunded or settled: keep the existing terminal state.
 	}
 	return nil
+}
+
+// MarkSubscriptionPreConsumeRefundRequested records the persistent intent to
+// refund a reservation. It runs synchronously on the request-failure path,
+// before the asynchronous refund goroutine, so a crash mid-refund leaves
+// durable evidence the recovery sweep can act on. Only still-"consumed"
+// records are marked: refunded/settled records already reached a terminal
+// state and no recovery is needed. Unknown requestIds are not an error.
+func MarkSubscriptionPreConsumeRefundRequested(requestId string) error {
+	if strings.TrimSpace(requestId) == "" {
+		return errors.New("requestId is empty")
+	}
+	res := DB.Model(&SubscriptionPreConsumeRecord{}).
+		Where("request_id = ? AND status = ? AND refund_requested_at = 0", requestId, "consumed").
+		Update("refund_requested_at", GetDBTimestamp())
+	return res.Error
+}
+
+// RecoverRequestedSubscriptionRefunds retries refunds whose persistent request
+// marker is still stuck in "consumed" — e.g. the process died between marking
+// the refund and the goroutine committing it. RefundSubscriptionPreConsume is
+// idempotent, so retries can never double-refund. Returns the number of
+// records that reached a terminal state.
+func RecoverRequestedSubscriptionRefunds(olderThanSeconds int64, limit int) (int, error) {
+	if olderThanSeconds <= 0 {
+		olderThanSeconds = 10 * 60
+	}
+	if limit <= 0 {
+		limit = 200
+	}
+	cutoff := GetDBTimestamp() - olderThanSeconds
+	var ids []string
+	if err := DB.Model(&SubscriptionPreConsumeRecord{}).
+		Where("status = ? AND refund_requested_at > 0 AND refund_requested_at < ?", "consumed", cutoff).
+		Order("refund_requested_at asc").Limit(limit).Pluck("request_id", &ids).Error; err != nil {
+		return 0, err
+	}
+	recovered := 0
+	for _, requestId := range ids {
+		if err := RefundSubscriptionPreConsume(requestId); err != nil {
+			common.SysLog("subscription refund recovery failed (requestId=" + requestId + "): " + err.Error())
+			continue
+		}
+		recovered++
+	}
+	return recovered, nil
+}
+
+// ClassifySubscriptionPreConsumeRecords returns read-only counts used for
+// observability: how many reservations are in each state, how many still
+// carry a pending refund request, and how many legacy "consumed" rows lack
+// period evidence (created before SubscriptionResetTime existed). It never
+// mutates anything: ambiguous legacy rows stay untouched pending manual
+// classification instead of being bulk-settled or bulk-refunded.
+func ClassifySubscriptionPreConsumeRecords() (consumed, settled, refunded, pendingRefund, legacyWithoutEvidence int64, err error) {
+	type row struct {
+		Status            string
+		RefundRequestedAt int64
+		SubscriptionResetTime int64
+	}
+	var rows []row
+	if err = DB.Model(&SubscriptionPreConsumeRecord{}).
+		Select("status, refund_requested_at, subscription_reset_time").Find(&rows).Error; err != nil {
+		return
+	}
+	for _, r := range rows {
+		switch r.Status {
+		case "consumed":
+			consumed++
+			if r.RefundRequestedAt > 0 {
+				pendingRefund++
+			}
+			if r.SubscriptionResetTime == 0 {
+				legacyWithoutEvidence++
+			}
+		case "settled":
+			settled++
+		case "refunded":
+			refunded++
+		}
+	}
+	return
 }
 
 // ResetDueSubscriptions resets subscriptions whose next_reset_time has passed.

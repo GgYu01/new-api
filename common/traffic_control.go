@@ -27,6 +27,11 @@ const (
 	TrafficControlMaxActiveOption        = "TrafficControlMaxActiveRequests"
 	TrafficControlWaitingQueueOption     = "TrafficControlWaitingQueue"
 	TrafficControlWaitingTimeoutMsOption = "TrafficControlWaitingTimeoutMs"
+	// TrafficControlRevisionOption persists the config revision so stale
+	// editors are rejected with 409 even after a process restart. It only
+	// changes through the authoritative submit path; loads and periodic syncs
+	// never bump it.
+	TrafficControlRevisionOption = "TrafficControlRevision"
 	// TrafficControlDefaultsMigratedOption records that the one-time switch from
 	// the legacy hybrid/120-era defaults to concurrency/240 has been applied.
 	// Once present, admin-modified values are never overwritten again.
@@ -42,7 +47,7 @@ const TrafficControlDefaultsMigratedValue = "concurrency-240-20260904"
 var trafficControlOptionKeys = []string{
 	TrafficControlEnabledOption, TrafficControlModeOption, TrafficControlGlobalRPMOption,
 	TrafficControlBurstOption, TrafficControlMaxActiveOption, TrafficControlWaitingQueueOption,
-	TrafficControlWaitingTimeoutMsOption,
+	TrafficControlWaitingTimeoutMsOption, TrafficControlRevisionOption,
 }
 
 // TrafficControlConfig is intentionally small and immutable after publication.
@@ -83,6 +88,26 @@ func ValidateTrafficControlConfig(cfg TrafficControlConfig) error {
 		return fmt.Errorf("max active requests must be positive in %s mode", cfg.Mode)
 	}
 	return nil
+}
+
+// trafficControlPersistedRevision mirrors the TrafficControlRevision option
+// row. It is the authoritative revision reported to clients and used for the
+// stale-submit 409 check; it survives process restarts because the option row
+// is its source of truth.
+var trafficControlPersistedRevision atomic.Uint64
+
+func SetTrafficControlPersistedRevision(revision uint64) {
+	trafficControlPersistedRevision.Store(revision)
+	if globalTrafficController != nil {
+		globalTrafficController.SetRevision(revision)
+	}
+}
+
+func GetTrafficControlPersistedRevision() uint64 {
+	if globalTrafficController != nil {
+		return globalTrafficController.Metrics().Revision
+	}
+	return trafficControlPersistedRevision.Load()
 }
 
 // TrafficControlMetrics is a bounded aggregate snapshot; it has no user/key/model labels.
@@ -172,6 +197,10 @@ func (t *TrafficController) UpdateConfig(cfg TrafficControlConfig, now time.Time
 	return nil
 }
 
+func (t *TrafficController) SetRevision(rev uint64) {
+	t.revision.Store(rev)
+}
+
 func (t *TrafficController) refillLocked(now time.Time) {
 	if now.Before(t.lastRefill) {
 		t.lastRefill = now
@@ -248,9 +277,18 @@ func (l *TrafficLease) Release() {
 }
 
 func (t *TrafficController) Metrics() TrafficControlMetrics {
+	t.mu.Lock()
+	cfg := t.cfg
+	rev := t.revision.Load()
+	t.mu.Unlock()
 	return TrafficControlMetrics{
-		ActiveCurrent: t.active.Load(), ActivePeak: t.activePeak.Load(), AdmittedTotal: t.admitted.Load(),
-		RejectedRPMTotal: t.rejectedRPM.Load(), RejectedActiveTotal: t.rejectedAct.Load(), Revision: t.revision.Load(), Config: t.Config(),
+		ActiveCurrent:       t.active.Load(),
+		ActivePeak:          t.activePeak.Load(),
+		AdmittedTotal:       t.admitted.Load(),
+		RejectedRPMTotal:    t.rejectedRPM.Load(),
+		RejectedActiveTotal: t.rejectedAct.Load(),
+		Revision:            rev,
+		Config:              cfg,
 	}
 }
 
@@ -307,7 +345,15 @@ func ApplyTrafficControlFromOptions(options map[string]string) error {
 	if err != nil {
 		return err
 	}
-	return SetTrafficControlConfig(cfg)
+	if err := SetTrafficControlConfig(cfg); err != nil {
+		return err
+	}
+	if revStr, ok := options[TrafficControlRevisionOption]; ok {
+		if rev, parseErr := strconv.ParseUint(strings.TrimSpace(revStr), 10, 64); parseErr == nil {
+			SetTrafficControlPersistedRevision(rev)
+		}
+	}
+	return nil
 }
 
 // SnapshotTrafficControlOptions extracts the traffic control option values from
@@ -323,6 +369,7 @@ func SnapshotTrafficControlOptions(optionMap map[string]string) map[string]strin
 		TrafficControlMaxActiveOption:        strconv.FormatInt(def.MaxActiveRequests, 10),
 		TrafficControlWaitingQueueOption:     strconv.FormatInt(def.WaitingQueue, 10),
 		TrafficControlWaitingTimeoutMsOption: strconv.FormatInt(def.WaitingTimeoutMs, 10),
+		TrafficControlRevisionOption:         strconv.FormatUint(GetTrafficControlPersistedRevision(), 10),
 	}
 	for _, key := range trafficControlOptionKeys {
 		if value, ok := optionMap[key]; ok {

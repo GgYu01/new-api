@@ -179,3 +179,67 @@ func TestDetectImageBridgeRewriteTransfersBodyOwnershipToContext(t *testing.T) {
 	// Responses requests must keep the flat function-tool encoding.
 	require.NotContains(t, string(replayed), `"function":`)
 }
+
+func TestDetectImageBridgeFastPathBypass(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	context, _ := gin.CreateTestContext(recorder)
+	body := `{"model":"gpt-4o","messages":[{"role":"user","content":"Hello, please write a short poem about the night sky."}]}`
+	context.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	context.Request.Header.Set("Content-Type", "application/json")
+
+	DetectImageBridge()(context)
+	_, ok := imagebridge.FromContext(context)
+	assert.False(t, ok)
+
+	seeker, err := common.GetBodyStorage(context)
+	require.NoError(t, err)
+	_, err = seeker.Seek(0, io.SeekStart)
+	require.NoError(t, err)
+	replayed, err := io.ReadAll(seeker)
+	require.NoError(t, err)
+	assert.Equal(t, body, string(replayed))
+}
+
+func TestDetectImageBridgeCaseInsensitiveCandidate(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	context, _ := gin.CreateTestContext(recorder)
+	body := `{"model":"DALL-E-3","prompt":"A majestic red fox in a snowy forest"}`
+	context.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	context.Request.Header.Set("Content-Type", "application/json")
+
+	DetectImageBridge()(context)
+	intent, ok := imagebridge.FromContext(context)
+	require.True(t, ok)
+	assert.Equal(t, "DALL-E-3", intent.ClientModel)
+}
+
+func BenchmarkDetectImageBridge_PlainChatCompletions(b *testing.B) {
+	gin.SetMode(gin.TestMode)
+	body := `{"model":"gpt-4o","messages":[{"role":"system","content":"You are a helpful assistant."},{"role":"user","content":"Explain quantum entanglement in simple terms with two examples."}],"temperature":0.7,"max_tokens":1000}`
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		recorder := httptest.NewRecorder()
+		context, _ := gin.CreateTestContext(recorder)
+		context.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+		context.Request.Header.Set("Content-Type", "application/json")
+		DetectImageBridge()(context)
+	}
+}
+
+func BenchmarkDetectImageBridge_ImageGeneration(b *testing.B) {
+	gin.SetMode(gin.TestMode)
+	body := `{"model":"gpt-image-1","prompt":"A high resolution photo of mountains at sunrise"}`
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		recorder := httptest.NewRecorder()
+		context, _ := gin.CreateTestContext(recorder)
+		context.Request = httptest.NewRequest(http.MethodPost, "/v1/images/generations", strings.NewReader(body))
+		context.Request.Header.Set("Content-Type", "application/json")
+		DetectImageBridge()(context)
+	}
+}
+

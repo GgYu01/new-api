@@ -87,6 +87,22 @@ func runSubscriptionQuotaResetOnce() {
 			subscriptionCleanupLast.Store(time.Now().Unix())
 		}
 	}
+	// Refund recovery: retries refunds whose persistent request marker is
+	// still stuck in "consumed" (e.g. crash between marking and the refund
+	// goroutine committing). The refund itself is idempotent.
+	if recovered, err := model.RecoverRequestedSubscriptionRefunds(10*60, 200); err != nil {
+		logger.LogWarn(ctx, fmt.Sprintf("subscription refund recovery sweep failed: %v", err))
+	} else if recovered > 0 {
+		logger.LogInfo(ctx, fmt.Sprintf("subscription refund recovery committed %d refunds", recovered))
+	}
+	// Read-only observability: report counts instead of bulk-mutating
+	// ambiguous legacy rows; classification is a human/ops decision.
+	if consumed, settled, refunded, pendingRefund, legacy, err := model.ClassifySubscriptionPreConsumeRecords(); err != nil {
+		logger.LogWarn(ctx, fmt.Sprintf("subscription pre-consume classification failed: %v", err))
+	} else if legacy > 0 || pendingRefund > 0 {
+		logger.LogWarn(ctx, fmt.Sprintf("subscription pre-consume pending-verification: consumed=%d settled=%d refunded=%d pending_refund=%d legacy_without_period_evidence=%d",
+			consumed, settled, refunded, pendingRefund, legacy))
+	}
 	if common.DebugEnabled && (totalReset > 0 || totalExpired > 0) {
 		logger.LogDebug(ctx, "subscription maintenance: reset_count=%d, expired_count=%d", totalReset, totalExpired)
 	}

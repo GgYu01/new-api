@@ -64,14 +64,68 @@ export function TrafficControlSection({ defaultValues }: Props) {
   const { isDirty } = useFormState({ control: form.control })
   const appliedDefaultsRef = useRef<FormInput | null>(null)
 
+  const isDirtyRef = useRef(isDirty)
+  useEffect(() => { isDirtyRef.current = isDirty }, [isDirty])
+
   const refresh = useCallback(async () => {
     try {
       const response = await api.get('/api/option/traffic-control')
-      if (response.data.success) setRuntime(response.data.data)
+      if (response.data.success) {
+        const data: Runtime = response.data.data
+        setRuntime(data)
+        if (!isDirtyRef.current) {
+          revisionRef.current = data.revision
+        }
+      }
     } catch { /* keep the last runtime snapshot */ }
   }, [])
-  useEffect(() => { void refresh() }, [refresh])
-  useEffect(() => { if (runtime) revisionRef.current = runtime.revision }, [runtime])
+
+  // Low-frequency polling when visible with backoff on failure; stops when hidden or unmounted
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | null = null
+    let delay = 5000
+    let stopped = false
+
+    const poll = async () => {
+      if (stopped) return
+      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
+        timer = setTimeout(poll, 5000)
+        return
+      }
+      try {
+        const response = await api.get('/api/option/traffic-control')
+        if (!stopped && response.data.success) {
+          const data: Runtime = response.data.data
+          setRuntime(data)
+          if (!isDirtyRef.current) {
+            revisionRef.current = data.revision
+          }
+          delay = 5000
+        }
+      } catch {
+        delay = Math.min(delay * 2, 30000)
+      }
+      if (!stopped) {
+        timer = setTimeout(poll, delay)
+      }
+    }
+
+    void refresh()
+    timer = setTimeout(poll, delay)
+
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        void refresh()
+      }
+    }
+    document.addEventListener('visibilitychange', onVisibilityChange)
+
+    return () => {
+      stopped = true
+      if (timer) clearTimeout(timer)
+      document.removeEventListener('visibilitychange', onVisibilityChange)
+    }
+  }, [refresh])
 
   // Adopt server-returned config after a successful save so the form always
   // reflects the effective runtime values, then refresh the shared options
