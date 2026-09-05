@@ -1,14 +1,12 @@
 package middleware
 
 import (
-	"bytes"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
-	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/relay/imagebridge"
 	"github.com/gin-gonic/gin"
 )

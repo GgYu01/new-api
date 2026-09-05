@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
