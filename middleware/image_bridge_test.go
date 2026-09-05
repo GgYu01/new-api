@@ -150,3 +150,32 @@ func TestDetectImageBridgeExplicitStreamFalseOverridesAcceptSSE(t *testing.T) {
 	require.True(t, ok)
 	assert.False(t, intent.Stream)
 }
+
+func TestDetectImageBridgeRewriteTransfersBodyOwnershipToContext(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	context, _ := gin.CreateTestContext(recorder)
+	context.Set("id", 1)
+	common.SetContextKey(context, constant.ContextKeyTokenSubscriptionType, "gptopenaicodex")
+	body := `{"model":"gpt-5.6-sol","input":"caption this","tools":[{"type":"image_generation"}],"tool_choice":"auto"}`
+	context.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body))
+	context.Request.Header.Set("Content-Type", "application/json")
+
+	DetectImageBridge()(context)
+
+	// The context storage must be the NEW storage, still open and replayable;
+	// reading it again must not fail with "body storage is closed".
+	seeker, err := common.GetBodyStorage(context)
+	require.NoError(t, err)
+	_, err = seeker.Seek(0, io.SeekStart)
+	require.NoError(t, err)
+	replayed, err := io.ReadAll(seeker)
+	require.NoError(t, err)
+	require.Contains(t, string(replayed), imagebridge.PlannerImageToolName)
+	require.NotContains(t, string(replayed), `"type":"image_generation"`)
+	// The rewritten body has a different length than the original; the request
+	// content length must track the effective body.
+	require.Equal(t, int64(len(replayed)), context.Request.ContentLength)
+	// Responses requests must keep the flat function-tool encoding.
+	require.NotContains(t, string(replayed), `"function":`)
+}

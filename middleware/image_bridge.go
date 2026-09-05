@@ -61,17 +61,28 @@ func DetectImageBridge() gin.HandlerFunc {
 			// must be private so CPA can plan without executing GPT image output.
 			_, _ = storage.Seek(0, io.SeekStart)
 			if raw, readErr := io.ReadAll(storage); readErr == nil {
-				if rewritten, changed, rewriteErr := imagebridge.RewriteAutoImageTool(raw); rewriteErr != nil {
+				envelope := imagebridge.EnvelopeChat
+				if path == "/v1/responses" {
+					envelope = imagebridge.EnvelopeResponses
+				}
+				if rewritten, changed, rewriteErr := imagebridge.RewriteAutoImageToolForEnvelope(raw, envelope); rewriteErr != nil {
 					abortWithOpenAiMessage(c, http.StatusBadRequest, fmt.Sprintf("invalid image planner request: %v", rewriteErr))
 					return
 				} else if changed {
-					oldStorage := storage
-					storage, err = common.CreateBodyStorage(rewritten)
-					if err != nil {
-						abortWithOpenAiMessage(c, http.StatusBadRequest, fmt.Sprintf("invalid image planner request: %v", err))
+					// One-shot ownership transfer: publish the new storage in the
+					// context and request first, then release the old owner. The
+					// previous order (close old, context still holding the closed
+					// storage) made every later GetBodyStorage fail with
+					// "body storage is closed".
+					newStorage, createErr := common.CreateBodyStorage(rewritten)
+					if createErr != nil {
+						abortWithOpenAiMessage(c, http.StatusBadRequest, fmt.Sprintf("invalid image planner request: %v", createErr))
 						return
 					}
-					_ = oldStorage.Close()
+					c.Set(common.KeyBodyStorage, newStorage)
+					c.Request.ContentLength = int64(len(rewritten))
+					_ = storage.Close()
+					storage = newStorage
 				}
 			}
 		}
