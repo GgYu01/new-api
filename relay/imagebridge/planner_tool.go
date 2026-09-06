@@ -1,85 +1,100 @@
 package imagebridge
 
 import (
-	"github.com/QuantumNous/new-api/common"
+	"bytes"
+	"encoding/json"
+
 	"github.com/tidwall/gjson"
 )
 
 const PlannerImageToolName = "__newapi_generate_gpt_image"
 
+func plannerImageToolParameters() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"prompt": map[string]any{
+				"type":        "string",
+				"description": "The description of the image to generate or edit",
+			},
+			"size": map[string]any{
+				"type":        "string",
+				"enum":        []string{"1024x1024", "1024x1792", "1792x1024", "512x512", "256x256"},
+				"description": "Output dimensions for generated images",
+			},
+			"quality": map[string]any{
+				"type":        "string",
+				"enum":        []string{"standard", "hd"},
+				"description": "Quality tier for the generated image",
+			},
+			"n": map[string]any{
+				"type":        "integer",
+				"description": "Number of images to generate",
+			},
+			"image": map[string]any{
+				"type":        "string",
+				"description": "Base image reference, URL, or file ID for editing or variations",
+			},
+			"mask": map[string]any{
+				"type":        "string",
+				"description": "Mask image reference for inpainting edits",
+			},
+			"output_format": map[string]any{
+				"type":        "string",
+				"enum":        []string{"png", "jpeg", "webp"},
+				"description": "Desired output image encoding format",
+			},
+			"background": map[string]any{
+				"type":        "string",
+				"description": "Background description or style",
+			},
+		},
+		"required": []string{"prompt"},
+	}
+}
+
 // RewriteAutoImageTool replaces the provider-native image tool with a private
-// function understood by NewAPI. It is intentionally a semantic JSON rewrite:
-// prompt/content values are not inspected or truncated. The caller must only
-// invoke it for an authenticated GPT request with tool_choice auto/omitted.
-// Chat Completions and Responses use different function-tool encodings, so the
-// rewrite follows the request envelope instead of reusing the Chat shape.
-//
-// The common case — a request without image tools — is decided with cheap
-// gjson probes; the full map decode/encode round-trip runs only when a
-// rewrite is actually needed.
+// function understood by NewAPI.
 func RewriteAutoImageTool(body []byte) ([]byte, bool, error) {
 	return RewriteAutoImageToolForEnvelope(body, EnvelopeChat)
 }
 
-// rewriteNeeded decides whether the auto-image rewrite applies, using only
-// cheap gjson probes. It must stay decision-identical to the map-based scan
-// in RewriteAutoImageToolForEnvelope (isImageTool + planner veto): the shared
-// contract is
-//
-//	plannerSeen = any tool where functionToolName == PlannerImageToolName
-//	              (type=="function", flat or nested name)
-//	              or function.name == PlannerImageToolName (any type)
-//	imageSeen   = any tool where type == "image_generation"
-//	              or function.name == "image_generation" (any type)
-//	              or type=="function" with flat name "image_generation"
-//
-// and the decision is imageSeen && !plannerSeen after the tool_choice guard.
-// The planner veto scans every tool, so the decision never depends on array
-// order.
 func rewriteNeeded(body []byte) bool {
 	if choice := gjson.GetBytes(body, "tool_choice"); choice.Exists() {
 		if text := choice.String(); choice.Type == gjson.String {
-			if text != "" && text != "auto" {
+			if text == "none" {
 				return false
 			}
-		} else if choice.IsObject() {
-			return false
 		}
 	}
+
 	tools := gjson.GetBytes(body, "tools")
 	if !tools.IsArray() {
 		return false
 	}
-	imageTool := false
-	plannerTool := false
+	hasNativeImageTool := false
 	tools.ForEach(func(_, item gjson.Result) bool {
 		if toolType := item.Get("type"); toolType.Type == gjson.String {
 			switch toolType.String() {
 			case "image_generation":
-				imageTool = true
+				hasNativeImageTool = true
+				return false
 			case "function":
-				if name, ok := functionToolNameGjson(item); ok {
-					if name == PlannerImageToolName {
-						plannerTool = true
-					} else if name == "image_generation" {
-						imageTool = true
-					}
+				if name, ok := functionToolNameGjson(item); ok && name == "image_generation" {
+					hasNativeImageTool = true
+					return false
 				}
 			}
 		}
 		if function := item.Get("function"); function.IsObject() {
-			if name := function.Get("name"); name.Type == gjson.String {
-				switch name.String() {
-				case PlannerImageToolName:
-					plannerTool = true
-				case "image_generation":
-					imageTool = true
-				}
+			if name := function.Get("name"); name.Type == gjson.String && name.String() == "image_generation" {
+				hasNativeImageTool = true
+				return false
 			}
 		}
-		return !imageTool || !plannerTool
+		return true
 	})
-	return imageTool && !plannerTool
+	return hasNativeImageTool
 }
 
 func functionToolNameGjson(tool gjson.Result) (string, bool) {
@@ -95,76 +110,128 @@ func functionToolNameGjson(tool gjson.Result) (string, bool) {
 	return "", false
 }
 
-func RewriteAutoImageToolForEnvelope(body []byte, envelope Envelope) ([]byte, bool, error) {
-	if !rewriteNeeded(body) {
-		return body, false, nil
-	}
-	var payload map[string]any
-	if err := common.Unmarshal(body, &payload); err != nil {
-		return body, false, nil
-	}
-	choice, hasChoice := payload["tool_choice"]
-	if hasChoice {
-		if text, ok := choice.(string); ok && text != "" && text != "auto" {
-			return body, false, nil
+func rewriteToolChoice(choice any) (any, bool) {
+	if text := stringValue(choice); text != "" {
+		if text == "image_generation" {
+			return PlannerImageToolName, true
 		}
-		if _, forced := choice.(map[string]any); forced {
-			return body, false, nil
+	} else if choiceObj, ok := choice.(map[string]any); ok {
+		changed := false
+		if fn, ok := choiceObj["function"].(map[string]any); ok {
+			if fnName := stringValue(fn["name"]); fnName == "image_generation" {
+				fn["name"] = PlannerImageToolName
+				changed = true
+			}
+		}
+		if name := stringValue(choiceObj["name"]); name == "image_generation" {
+			choiceObj["name"] = PlannerImageToolName
+			changed = true
+		}
+		if typ := stringValue(choiceObj["type"]); typ == "image_generation" {
+			choiceObj["type"] = "function"
+			choiceObj["name"] = PlannerImageToolName
+			changed = true
+		}
+		if changed {
+			return choiceObj, true
 		}
 	}
-	tools, ok := payload["tools"].([]any)
-	if !ok {
-		return body, false, nil
-	}
-	// Never introduce a second definition of the private planner function: a
-	// client-defined function with the same name would make the tool call
-	// target ambiguous. Mirrors the planner veto in rewriteNeeded, including
-	// function-object tools without a "type" field.
+	return choice, false
+}
+
+func rewriteTools(tools []any, envelope Envelope) ([]any, bool) {
+	plannerToolPresent := false
 	for _, raw := range tools {
 		if name, ok := functionToolName(raw); ok && name == PlannerImageToolName {
-			return body, false, nil
+			plannerToolPresent = true
+			break
 		}
 		if function, ok := raw.(map[string]any); ok {
 			if fn, ok := function["function"].(map[string]any); ok {
 				if name, ok := fn["name"].(string); ok && name == PlannerImageToolName {
-					return body, false, nil
+					plannerToolPresent = true
+					break
 				}
 			}
 		}
 	}
+
+	newTools := make([]any, 0, len(tools))
 	rewritten := false
-	for index, raw := range tools {
+
+	for _, raw := range tools {
 		tool, ok := raw.(map[string]any)
-		if !ok || !isImageTool(tool) {
+		if !ok {
+			newTools = append(newTools, raw)
 			continue
 		}
-		if envelope == EnvelopeResponses {
-			// Responses API function tools are flat: name/description/parameters
-			// live at the top level, there is no "function" wrapper.
-			tools[index] = map[string]any{
-				"type":        "function",
-				"name":        PlannerImageToolName,
-				"description": "Generate or edit a GPT image through NewAPI",
-				"parameters":  map[string]any{"type": "object"},
+		if isImageTool(tool) {
+			rewritten = true
+			if !plannerToolPresent {
+				if envelope == EnvelopeResponses {
+					newTools = append(newTools, map[string]any{
+						"type":        "function",
+						"name":        PlannerImageToolName,
+						"description": "Generate, edit, or create variations of images using AI",
+						"parameters":  plannerImageToolParameters(),
+					})
+				} else {
+					newTools = append(newTools, map[string]any{
+						"type": "function",
+						"function": map[string]any{
+							"name":        PlannerImageToolName,
+							"description": "Generate, edit, or create variations of images using AI",
+							"parameters":  plannerImageToolParameters(),
+						},
+					})
+				}
+				plannerToolPresent = true
 			}
-		} else {
-			// Chat Completions function tools nest under a "function" object.
-			tools[index] = map[string]any{
-				"type": "function",
-				"function": map[string]any{
-					"name":        PlannerImageToolName,
-					"description": "Generate or edit a GPT image through NewAPI",
-					"parameters":  map[string]any{"type": "object"},
-				},
-			}
+			// Drops duplicate native image tool so native image capability is never exposed to CPA.
+			continue
 		}
-		rewritten = true
+		newTools = append(newTools, tool)
 	}
-	if !rewritten {
+	return newTools, rewritten
+}
+
+func RewriteAutoImageToolForEnvelope(body []byte, envelope Envelope) ([]byte, bool, error) {
+	if !rewriteNeeded(body) {
 		return body, false, nil
 	}
-	payload["tools"] = tools
-	rewrittenBody, err := common.Marshal(payload)
+
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.UseNumber()
+	var payload map[string]any
+	if err := decoder.Decode(&payload); err != nil {
+		return body, false, nil
+	}
+
+	choiceRewritten := false
+	if choice, hasChoice := payload["tool_choice"]; hasChoice {
+		newChoice, changed := rewriteToolChoice(choice)
+		if changed {
+			payload["tool_choice"] = newChoice
+			choiceRewritten = true
+		}
+	}
+
+	tools, ok := payload["tools"].([]any)
+	if !ok {
+		if choiceRewritten {
+			rewrittenBody, err := json.Marshal(payload)
+			return rewrittenBody, err == nil, err
+		}
+		return body, false, nil
+	}
+
+	newTools, toolsRewritten := rewriteTools(tools, envelope)
+	if !choiceRewritten && !toolsRewritten {
+		return body, false, nil
+	}
+
+	payload["tools"] = newTools
+	rewrittenBody, err := json.Marshal(payload)
 	if err != nil {
 		return body, false, err
 	}
@@ -176,14 +243,14 @@ func functionToolName(raw any) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	if tool["type"] != "function" {
+	if stringValue(tool["type"]) != "function" {
 		return "", false
 	}
-	if name, ok := tool["name"].(string); ok && name != "" {
+	if name := stringValue(tool["name"]); name != "" {
 		return name, true
 	}
 	if function, ok := tool["function"].(map[string]any); ok {
-		if name, ok := function["name"].(string); ok && name != "" {
+		if name := stringValue(function["name"]); name != "" {
 			return name, true
 		}
 	}
@@ -191,11 +258,11 @@ func functionToolName(raw any) (string, bool) {
 }
 
 func isImageTool(tool map[string]any) bool {
-	if text, ok := tool["type"].(string); ok && text == "image_generation" {
+	if text := stringValue(tool["type"]); text == "image_generation" {
 		return true
 	}
 	if function, ok := tool["function"].(map[string]any); ok {
-		if name, ok := function["name"].(string); ok && name == "image_generation" {
+		if name := stringValue(function["name"]); name == "image_generation" {
 			return true
 		}
 	}

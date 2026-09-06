@@ -1,6 +1,8 @@
 package model
 
 import (
+	"fmt"
+	"strings"
 	"sync"
 	"testing"
 
@@ -15,15 +17,20 @@ func useTrafficControlTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
 	previousDB := DB
 	previousType := common.MainDatabaseType()
-	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	dsn := fmt.Sprintf("file:%s?mode=memory&cache=shared", strings.ReplaceAll(t.Name(), "/", "_"))
+	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
 	require.NoError(t, err)
 	require.NoError(t, db.AutoMigrate(&Option{}))
+	sqlDB, err := db.DB()
+	require.NoError(t, err)
+	sqlDB.SetMaxOpenConns(4)
 	DB = db
 	common.SetMainDatabaseType(common.DatabaseTypeSQLite)
 	common.SetTrafficControlPersistedRevision(0)
 	t.Cleanup(func() {
 		DB = previousDB
 		common.SetMainDatabaseType(previousType)
+		_ = sqlDB.Close()
 	})
 	return db
 }
@@ -62,6 +69,54 @@ func TestUpdateTrafficControlAuthoritativeBumpsRevisionAndPersists(t *testing.T)
 	staleRev := uint64(1)
 	_, err = UpdateTrafficControlAuthoritative(cfg3, &staleRev)
 	assert.ErrorIs(t, err, ErrTrafficControlConflict)
+
+	// Idempotent update with matching expectedRevision=2 and identical config does not bump revision
+	sameRev := uint64(2)
+	metricsSame, err := UpdateTrafficControlAuthoritative(cfg2, &sameRev)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(2), metricsSame.Revision, "matching revision with identical content must be idempotent")
+
+	// Idempotent update with expectedRevision=nil and identical config does not bump revision
+	metricsNilSame, err := UpdateTrafficControlAuthoritative(cfg2, nil)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(2), metricsNilSame.Revision, "nil expected revision with identical content must be idempotent")
+
+	// Older revision with identical content is still rejected (old revision must never overwrite)
+	_, err = UpdateTrafficControlAuthoritative(cfg2, &staleRev)
+	assert.ErrorIs(t, err, ErrTrafficControlConflict, "older revision must always be rejected even if content matches")
+}
+
+func TestUpdateTrafficControlAuthoritativeConcurrentInitialCreation(t *testing.T) {
+	_ = useTrafficControlTestDB(t)
+
+	// Multiple concurrent goroutines attempt to initialize on a blank database
+	const concurrency = 8
+	var wg sync.WaitGroup
+	barrier := make(chan struct{})
+	errorsCh := make(chan error, concurrency)
+
+	for i := 0; i < concurrency; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			<-barrier
+			cfg := common.DefaultTrafficControlConfig()
+			cfg.MaxActiveRequests = int64(200 + idx)
+			_, err := UpdateTrafficControlAuthoritative(cfg, nil)
+			errorsCh <- err
+		}(i)
+	}
+
+	close(barrier)
+	wg.Wait()
+	close(errorsCh)
+
+	for err := range errorsCh {
+		assert.NoError(t, err, "concurrent initial creations must not fail with unique constraint collisions")
+	}
+
+	metrics := common.GetTrafficControlMetrics()
+	assert.GreaterOrEqual(t, metrics.Revision, uint64(1), "revision must have been initialized and bumped")
 }
 
 func TestUpdateTrafficControlAuthoritativeConcurrentBarrier(t *testing.T) {

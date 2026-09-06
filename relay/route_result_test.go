@@ -16,7 +16,7 @@ func TestClassifyRouteProviderAndOperationMatrix(t *testing.T) {
 		{"vision input", RouteRequest{SubscriptionFamily: SubscriptionGPT, Endpoint: "/v1/responses", RequestedModel: "gpt-5.6-terra", InputHasImage: true}, BackendCPACodex, OperationVisionText},
 		{"gpt image", RouteRequest{SubscriptionFamily: SubscriptionGPT, Endpoint: "/v1/images/generations", RequestedModel: "gpt-image-1"}, BackendC2AImage, OperationImageGenerate},
 		{"gpt image edit", RouteRequest{SubscriptionFamily: SubscriptionGPT, Endpoint: "/v1/images/edits", RequestedModel: "gpt-image-1"}, BackendC2AImage, OperationImageEdit},
-		{"gpt legacy edit", RouteRequest{SubscriptionFamily: SubscriptionGPT, Endpoint: "/v1/edits", RequestedModel: "gpt-image-1"}, BackendC2AImage, OperationImageEdit},
+		{"gpt legacy edit", RouteRequest{SubscriptionFamily: SubscriptionGPT, Endpoint: "/v1/edits", RequestedModel: "text-davinci-edit-001"}, BackendCPACodex, OperationText},
 		{"gpt image variation", RouteRequest{SubscriptionFamily: SubscriptionGPT, Endpoint: "/v1/images/variations", RequestedModel: "gpt-image-1"}, BackendC2AImage, OperationImageVariation},
 		{"mixed auto", RouteRequest{SubscriptionFamily: SubscriptionGPT, Endpoint: "/v1/responses", RequestedModel: "gpt-5.6-luna"}, BackendCPACodex, OperationText},
 		{"forced image tool", RouteRequest{SubscriptionFamily: SubscriptionGPT, Endpoint: "/v1/responses", RequestedModel: "gpt-5.6-luna", ToolChoice: "image_generation"}, BackendC2AImage, OperationImageGenerate},
@@ -27,6 +27,7 @@ func TestClassifyRouteProviderAndOperationMatrix(t *testing.T) {
 		{"grok text", RouteRequest{SubscriptionFamily: SubscriptionGrok, Endpoint: "/v1/chat/completions", RequestedModel: "grok-4.3"}, BackendCPAXAI, OperationText},
 		{"grok image", RouteRequest{SubscriptionFamily: SubscriptionGrok, Endpoint: "/v1/images/generations", RequestedModel: "grok-imagine-image"}, BackendCPAXAI, OperationImageGenerate},
 		{"grok video", RouteRequest{SubscriptionFamily: SubscriptionGrok, Endpoint: "/v1/videos", RequestedModel: "grok-imagine-video"}, BackendCPAXAI, OperationVideo},
+		{"unrestricted general text", RouteRequest{SubscriptionFamily: "", Endpoint: "/v1/chat/completions", RequestedModel: "custom-llm"}, BackendCPACodex, OperationText},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

@@ -46,6 +46,7 @@ func TestRewriteSkipsWhenPlannerFunctionNameAlreadyDefined(t *testing.T) {
 	body := []byte(`{"tools":[{"type":"image_generation"},{"type":"function","name":"__newapi_generate_gpt_image","parameters":{"type":"object"}}]}`)
 	rewritten, changed, err := RewriteAutoImageToolForEnvelope(body, EnvelopeResponses)
 	require.NoError(t, err)
-	require.False(t, changed)
-	require.Equal(t, string(body), string(rewritten))
+	require.True(t, changed)
+	require.NotContains(t, string(rewritten), `"type":"image_generation"`)
+	require.Contains(t, string(rewritten), PlannerImageToolName)
 }

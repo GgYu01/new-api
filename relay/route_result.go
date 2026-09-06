@@ -30,12 +30,15 @@ const (
 )
 
 type RouteRequest struct {
-	SubscriptionFamily SubscriptionFamily
-	Endpoint           string
-	RequestedModel     string
-	ToolChoice         any
-	Modalities         []string
-	InputHasImage      bool
+	Method             string             `json:"method"`
+	SubscriptionFamily SubscriptionFamily `json:"subscription_family"`
+	Endpoint           string             `json:"endpoint"`
+	RequestedModel     string             `json:"requested_model"`
+	ToolChoice         any                `json:"tool_choice"`
+	Modalities         []string           `json:"modalities"`
+	InputHasImage      bool               `json:"input_has_image"`
+	ChannelProvider    ProviderFamily     `json:"channel_provider"`
+	Protocol           string             `json:"protocol"`
 }
 
 type RouteResult struct {
@@ -52,55 +55,83 @@ func ClassifyRoute(req RouteRequest) (RouteResult, error) {
 	family := req.SubscriptionFamily
 	model := strings.ToLower(strings.TrimSpace(req.RequestedModel))
 	modelGrok := strings.HasPrefix(model, "grok")
-	if family != SubscriptionGPT && family != SubscriptionGrok {
+	if family != "" && family != SubscriptionGPT && family != SubscriptionGrok {
 		return RouteResult{}, fmt.Errorf("unsupported subscription family %q", family)
 	}
 	if (family == SubscriptionGPT && modelGrok) || (family == SubscriptionGrok && !modelGrok && model != "") {
 		return RouteResult{}, fmt.Errorf("model %q is outside %s subscription scope", req.RequestedModel, family)
 	}
-	result := RouteResult{SubscriptionFamily: family, RequestedModel: req.RequestedModel, EffectiveModel: req.RequestedModel, BillingModel: req.RequestedModel}
+	result := RouteResult{
+		SubscriptionFamily: family,
+		RequestedModel:     req.RequestedModel,
+		EffectiveModel:     req.RequestedModel,
+		BillingModel:       req.RequestedModel,
+	}
+
+	endpoint := strings.TrimSuffix(strings.SplitN(req.Endpoint, "?", 2)[0], "/")
+	isImageEndpoint := endpoint == "/v1/images" || strings.HasPrefix(endpoint, "/v1/images/")
+	isLegacyTextEdits := endpoint == "/v1/edits" || strings.HasPrefix(endpoint, "/v1/edits/")
+
 	if family == SubscriptionGrok {
 		result.ProviderFamily, result.ExecutionBackend = ProviderXAI, BackendCPAXAI
 		switch {
-		case strings.Contains(req.Endpoint, "/videos"):
+		case strings.Contains(endpoint, "/videos"):
 			result.OperationClass = OperationVideo
-		case strings.Contains(req.Endpoint, "/audio"):
+		case strings.Contains(endpoint, "/audio"):
 			result.OperationClass = OperationTTS
-		case strings.Contains(req.Endpoint, "/images") || strings.Contains(model, "imagine-image"):
+		case isImageEndpoint || strings.Contains(model, "imagine-image"):
 			result.OperationClass = OperationImageGenerate
 		default:
 			result.OperationClass = OperationText
 		}
 		return result, nil
 	}
-	result.ProviderFamily = ProviderOpenAICodex
-	if strings.Contains(req.Endpoint, "/audio/speech") {
+
+	if req.ChannelProvider != "" {
+		result.ProviderFamily = req.ChannelProvider
+	} else if family == SubscriptionGPT || strings.HasPrefix(model, "gpt") || strings.HasPrefix(model, "o1") || strings.HasPrefix(model, "o3") || strings.HasPrefix(model, "chatgpt") || strings.HasPrefix(model, "text-") || strings.HasPrefix(model, "dall-e") || strings.HasPrefix(model, "tts-") || strings.HasPrefix(model, "whisper-") {
+		result.ProviderFamily = ProviderOpenAICodex
+	} else {
+		result.ProviderFamily = ProviderOpenAICodex
+	}
+
+	if strings.Contains(endpoint, "/audio/speech") {
 		result.OperationClass = OperationTTS
 		result.ExecutionBackend = BackendCPACodex
 		return result, nil
 	}
-	if strings.Contains(req.Endpoint, "/audio/") {
+	if strings.Contains(endpoint, "/audio/") {
 		result.OperationClass = OperationSTT
 		result.ExecutionBackend = BackendCPACodex
 		return result, nil
 	}
-	if strings.Contains(req.Endpoint, "/realtime") {
+	if strings.Contains(endpoint, "/realtime") {
 		result.OperationClass = OperationRealtime
 		result.ExecutionBackend = BackendCPACodex
 		return result, nil
 	}
-	imageOutput := strings.Contains(req.Endpoint, "/images/") || strings.Contains(req.Endpoint, "/edits") || strings.HasPrefix(model, "gpt-image") || imageToolSelected(req.ToolChoice) || hasImageModality(req.Modalities)
-	if imageOutput {
-		result.OperationClass, result.ExecutionBackend = OperationImageGenerate, BackendC2AImage
-		if strings.Contains(req.Endpoint, "/edits") {
-			result.OperationClass = OperationImageEdit
-		}
-		if strings.Contains(req.Endpoint, "/variations") {
-			result.OperationClass = OperationImageVariation
-		}
-		result.EffectiveModel, result.BillingModel = "gpt-image-2", "gpt-image-2"
+
+	// Legacy /v1/edits is historical text editing, not image editing.
+	if isLegacyTextEdits {
+		result.OperationClass = OperationText
+		result.ExecutionBackend = BackendCPACodex
 		return result, nil
 	}
+
+	imageOutput := isImageEndpoint || strings.HasPrefix(model, "gpt-image") || imageToolSelected(req.ToolChoice) || hasImageModality(req.Modalities)
+	if imageOutput {
+		result.OperationClass, result.ExecutionBackend = OperationImageGenerate, BackendC2AImage
+		if strings.HasSuffix(endpoint, "/edits") {
+			result.OperationClass = OperationImageEdit
+		} else if strings.HasSuffix(endpoint, "/variations") {
+			result.OperationClass = OperationImageVariation
+		}
+		if strings.HasPrefix(model, "gpt-image") || result.RequestedModel == "" {
+			result.EffectiveModel, result.BillingModel = "gpt-image-2", "gpt-image-2"
+		}
+		return result, nil
+	}
+
 	result.ExecutionBackend = BackendCPACodex
 	if req.InputHasImage {
 		result.OperationClass = OperationVisionText

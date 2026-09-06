@@ -42,13 +42,13 @@ const (
 // one-time default migration; its absence means the migration has not run.
 const TrafficControlDefaultsMigratedValue = "concurrency-240-20260904"
 
-// trafficControlOptionKeys lists every option that participates in the full
-// config snapshot so a partial OptionMap can never be published.
 var trafficControlOptionKeys = []string{
 	TrafficControlEnabledOption, TrafficControlModeOption, TrafficControlGlobalRPMOption,
 	TrafficControlBurstOption, TrafficControlMaxActiveOption, TrafficControlWaitingQueueOption,
 	TrafficControlWaitingTimeoutMsOption, TrafficControlRevisionOption,
 }
+
+var TrafficControlOptionKeys = trafficControlOptionKeys
 
 // TrafficControlConfig is intentionally small and immutable after publication.
 // Waiting queues are reserved for a later phase and must remain zero.

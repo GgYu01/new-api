@@ -45,3 +45,40 @@ func TestBuildAlphaSearchRequestBodyNoMappingKeepsRawBytes(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, raw, out)
 }
+
+func TestValidateAlphaSearchResponseBody(t *testing.T) {
+	// Rejects HTML
+	_, err := validateAlphaSearchResponseBody([]byte(`<html><body>502 Bad Gateway</body></html>`))
+	require.NotNil(t, err)
+
+	// Rejects JSON array
+	_, err = validateAlphaSearchResponseBody([]byte(`["not", "an", "object"]`))
+	require.NotNil(t, err)
+
+	// Rejects invalid JSON
+	_, err = validateAlphaSearchResponseBody([]byte(`{"output": "truncated`))
+	require.NotNil(t, err)
+
+	// Rejects top-level error
+	_, err = validateAlphaSearchResponseBody([]byte(`{"error":{"message":"rate limit exceeded"}}`))
+	require.NotNil(t, err)
+
+	// Rejects missing output
+	_, err = validateAlphaSearchResponseBody([]byte(`{"results":[{"url":"https://example.com"}]}`))
+	require.NotNil(t, err)
+
+	// Rejects empty output
+	_, err = validateAlphaSearchResponseBody([]byte(`{"output":"   "}`))
+	require.NotNil(t, err)
+
+	// Accepts valid output with optional fields (results, encrypted_output, unknown variants)
+	validJSON := []byte(`{
+		"output": "Paris is the capital of France.",
+		"results": [{"url": "https://en.wikipedia.org/wiki/Paris"}],
+		"encrypted_output": "enc_xyz",
+		"custom_future_variant": {"flag": 1}
+	}`)
+	outputText, err := validateAlphaSearchResponseBody(validJSON)
+	require.Nil(t, err)
+	assert.Equal(t, "Paris is the capital of France.", outputText)
+}

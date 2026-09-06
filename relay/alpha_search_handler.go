@@ -2,10 +2,12 @@ package relay
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
@@ -110,40 +112,12 @@ func AlphaSearchHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError
 		)
 	}
 
-	// Validate minimal contract for SearchResponse before treating as successful:
-	// Output must not be HTML, must be valid JSON object, must contain "output" or "results", and no top-level "error".
+	outputText, valErr := validateAlphaSearchResponseBody(respBytes)
+	if valErr != nil {
+		return valErr
+	}
+
 	trimmed := bytes.TrimSpace(respBytes)
-	if len(trimmed) == 0 || trimmed[0] != '{' {
-		return types.NewErrorWithStatusCode(
-			errors.New("alpha search returned invalid non-JSON payload"),
-			types.ErrorCodeBadResponseBody,
-			http.StatusBadGateway,
-			types.ErrOptionWithSkipRetry(),
-		)
-	}
-	if errNode := gjson.GetBytes(trimmed, "error"); errNode.Exists() {
-		errMsg := "unknown upstream error"
-		if msg := errNode.Get("message").String(); msg != "" {
-			errMsg = msg
-		}
-		return types.NewErrorWithStatusCode(
-			fmt.Errorf("alpha search upstream error: %s", errMsg),
-			types.ErrorCodeBadResponseBody,
-			http.StatusBadGateway,
-			types.ErrOptionWithSkipRetry(),
-		)
-	}
-
-	if contentType := httpResp.Header.Get("Content-Type"); contentType != "" {
-		c.Writer.Header().Set("Content-Type", contentType)
-	} else {
-		c.Writer.Header().Set("Content-Type", "application/json")
-	}
-	c.Writer.WriteHeader(httpResp.StatusCode)
-	if _, err := c.Writer.Write(respBytes); err != nil {
-		return types.NewError(err, types.ErrorCodeDoRequestFailed, types.ErrOptionWithSkipRetry())
-	}
-
 	// Billing: check if upstream provided explicit token usage
 	usage := &dto.Usage{}
 	if usageNode := gjson.GetBytes(trimmed, "usage"); usageNode.IsObject() {
@@ -163,11 +137,56 @@ func AlphaSearchHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError
 			ToolName:  dto.BuildInToolWebSearchPreview,
 			CallCount: 1,
 		}
-		usage = service.ResponseText2Usage(c, gjson.GetBytes(trimmed, "output").String(), info.UpstreamModelName, info.GetEstimatePromptTokens())
+		usage = service.ResponseText2Usage(c, outputText, info.UpstreamModelName, info.GetEstimatePromptTokens())
 	}
 
+	// Quota is settled authoritatively regardless of client-side write errors
 	service.PostTextConsumeQuota(c, info, usage, nil)
+
+	if contentType := httpResp.Header.Get("Content-Type"); contentType != "" {
+		c.Writer.Header().Set("Content-Type", contentType)
+	} else {
+		c.Writer.Header().Set("Content-Type", "application/json")
+	}
+	c.Writer.WriteHeader(httpResp.StatusCode)
+	if _, writeErr := c.Writer.Write(respBytes); writeErr != nil {
+		logger.LogWarn(c, fmt.Sprintf("alpha search client write error: %v", writeErr))
+	}
 	return nil
+}
+
+func validateAlphaSearchResponseBody(respBytes []byte) (string, *types.NewAPIError) {
+	trimmed := bytes.TrimSpace(respBytes)
+	if len(trimmed) < 2 || trimmed[0] != '{' || trimmed[len(trimmed)-1] != '}' || !json.Valid(trimmed) {
+		return "", types.NewErrorWithStatusCode(
+			errors.New("alpha search returned invalid non-JSON payload"),
+			types.ErrorCodeBadResponseBody,
+			http.StatusBadGateway,
+			types.ErrOptionWithSkipRetry(),
+		)
+	}
+	if errNode := gjson.GetBytes(trimmed, "error"); errNode.Exists() {
+		errMsg := "unknown upstream error"
+		if msg := errNode.Get("message").String(); msg != "" {
+			errMsg = msg
+		}
+		return "", types.NewErrorWithStatusCode(
+			fmt.Errorf("alpha search upstream error: %s", errMsg),
+			types.ErrorCodeBadResponseBody,
+			http.StatusBadGateway,
+			types.ErrOptionWithSkipRetry(),
+		)
+	}
+	outputNode := gjson.GetBytes(trimmed, "output")
+	if !outputNode.Exists() || outputNode.Type != gjson.String || strings.TrimSpace(outputNode.String()) == "" {
+		return "", types.NewErrorWithStatusCode(
+			errors.New("alpha search response missing required non-empty 'output' string"),
+			types.ErrorCodeBadResponseBody,
+			http.StatusBadGateway,
+			types.ErrOptionWithSkipRetry(),
+		)
+	}
+	return outputNode.String(), nil
 }
 
 // buildAlphaSearchRequestBody returns RawBody unchanged unless the model was

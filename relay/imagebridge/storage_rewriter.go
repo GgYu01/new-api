@@ -1,0 +1,229 @@
+package imagebridge
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"sort"
+
+	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
+)
+
+type replacementSpan struct {
+	start       int64
+	end         int64
+	replacement []byte
+}
+
+type offsetReplacementReader struct {
+	source      io.Reader
+	sourcePos   int64
+	spans       []replacementSpan
+	currentSpan int
+	spanPos     int
+}
+
+func newOffsetReplacementReader(source io.Reader, spans []replacementSpan) *offsetReplacementReader {
+	// Sort spans by start offset in ascending order
+	sort.Slice(spans, func(i, j int) bool {
+		return spans[i].start < spans[j].start
+	})
+	return &offsetReplacementReader{
+		source: source,
+		spans:  spans,
+	}
+}
+
+func (r *offsetReplacementReader) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	for {
+		if r.currentSpan >= len(r.spans) {
+			n, err := r.source.Read(p)
+			r.sourcePos += int64(n)
+			return n, err
+		}
+
+		span := r.spans[r.currentSpan]
+
+		// 1. Still before span start: read from source up to span.start
+		if r.sourcePos < span.start {
+			toRead := int(span.start - r.sourcePos)
+			if toRead > len(p) {
+				toRead = len(p)
+			}
+			n, err := r.source.Read(p[:toRead])
+			r.sourcePos += int64(n)
+			if n > 0 || err != nil {
+				return n, err
+			}
+			continue
+		}
+
+		// 2. At span start, emit replacement bytes
+		if r.spanPos < len(span.replacement) {
+			n := copy(p, span.replacement[r.spanPos:])
+			r.spanPos += n
+			return n, nil
+		}
+
+		// 3. Finished replacement bytes, discard/skip original bytes between start and end
+		if r.sourcePos < span.end {
+			toDiscard := span.end - r.sourcePos
+			if seeker, ok := r.source.(io.Seeker); ok {
+				_, err := seeker.Seek(span.end, io.SeekStart)
+				if err != nil {
+					return 0, err
+				}
+				r.sourcePos = span.end
+			} else {
+				discarded, err := io.CopyN(io.Discard, r.source, toDiscard)
+				r.sourcePos += discarded
+				if err != nil {
+					return 0, err
+				}
+			}
+		}
+
+		// Advance to next span
+		r.currentSpan++
+		r.spanPos = 0
+	}
+}
+
+// DetectAndRewriteJSONStorage inspects body storage (either memory or disk-backed)
+// and rewrites native image tools to private NewAPI planner tools without
+// materializing large request bodies into RAM.
+func DetectAndRewriteJSONStorage(storage common.BodyStorage, envelope Envelope) (common.BodyStorage, bool, error) {
+	if storage == nil {
+		return nil, false, nil
+	}
+
+	// Quick check: does it contain "tools" and "image"?
+	if !storage.IsDisk() {
+		raw, err := storage.Bytes()
+		if err != nil {
+			return storage, false, err
+		}
+		if !ContainsJSONKeyword(raw, "tools") || !ContainsJSONKeyword(raw, "image") {
+			return storage, false, nil
+		}
+	} else {
+		reader, err := storage.NewReader()
+		if err != nil {
+			return storage, false, err
+		}
+		hasTools := ContainsJSONKeywordStreaming(reader, "tools")
+		_ = reader.Close()
+		if !hasTools {
+			return storage, false, nil
+		}
+
+		reader2, err := storage.NewReader()
+		if err != nil {
+			return storage, false, err
+		}
+		hasImage := ContainsJSONKeywordStreaming(reader2, "image")
+		_ = reader2.Close()
+		if !hasImage {
+			return storage, false, nil
+		}
+	}
+
+	reader, err := storage.NewReader()
+	if err != nil {
+		return storage, false, err
+	}
+	defer reader.Close()
+
+	parser := newJSONStreamParser(reader)
+	offsets := &RewriterOffsets{}
+	parser.offsets = offsets
+
+	_, err = parser.parseDocument()
+	if err != nil {
+		// If JSON parsing fails, return original storage to let downstream validator reject it
+		return storage, false, nil
+	}
+
+	// If tool_choice is "none", tools rewriting is disabled
+	if offsets.ChoiceValue != nil {
+		if text := stringValue(offsets.ChoiceValue); text == "none" {
+			return storage, false, nil
+		}
+	}
+
+	var spans []replacementSpan
+	deltaSize := int64(0)
+
+	// Inspect tools
+	if offsets.ToolsRange[1] > offsets.ToolsRange[0] && offsets.ToolsValue != nil {
+		if toolsList, ok := offsets.ToolsValue.([]any); ok {
+			newTools, changed := rewriteTools(toolsList, envelope)
+			if changed {
+				newToolsBytes, err := json.Marshal(newTools)
+				if err != nil {
+					return storage, false, err
+				}
+				oldLen := offsets.ToolsRange[1] - offsets.ToolsRange[0]
+				spans = append(spans, replacementSpan{
+					start:       offsets.ToolsRange[0],
+					end:         offsets.ToolsRange[1],
+					replacement: newToolsBytes,
+				})
+				deltaSize += int64(len(newToolsBytes)) - oldLen
+			}
+		}
+	}
+
+	// Inspect tool_choice
+	if offsets.ChoiceRange[1] > offsets.ChoiceRange[0] && offsets.ChoiceValue != nil {
+		newChoice, changed := rewriteToolChoice(offsets.ChoiceValue)
+		if changed {
+			newChoiceBytes, err := json.Marshal(newChoice)
+			if err != nil {
+				return storage, false, err
+			}
+			oldLen := offsets.ChoiceRange[1] - offsets.ChoiceRange[0]
+			spans = append(spans, replacementSpan{
+				start:       offsets.ChoiceRange[0],
+				end:         offsets.ChoiceRange[1],
+				replacement: newChoiceBytes,
+			})
+			deltaSize += int64(len(newChoiceBytes)) - oldLen
+		}
+	}
+
+	if len(spans) == 0 {
+		return storage, false, nil
+	}
+
+	// Rewriting needed: stream through offsetReplacementReader into new storage
+	streamReader, err := storage.NewReader()
+	if err != nil {
+		return storage, false, err
+	}
+	defer streamReader.Close()
+
+	replacer := newOffsetReplacementReader(streamReader, spans)
+
+	maxMB := constant.MaxRequestBodyMB
+	if maxMB <= 0 {
+		maxMB = 128
+	}
+	maxBytes := int64(maxMB) << 20
+	newContentLength := storage.Size() + deltaSize
+	if newContentLength > maxBytes {
+		maxBytes = newContentLength + (1 << 20)
+	}
+
+	newStorage, err := common.CreateBodyStorageFromReader(replacer, newContentLength, maxBytes)
+	if err != nil {
+		return storage, false, fmt.Errorf("failed to create rewritten body storage: %w", err)
+	}
+
+	_ = storage.Close()
+	return newStorage, true, nil
+}

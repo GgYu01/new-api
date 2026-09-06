@@ -160,3 +160,47 @@ func TestClassifySubscriptionPreConsumeRecordsCountsStates(t *testing.T) {
 	require.Equal(t, int64(1), pendingRefund)
 	require.Equal(t, int64(2), legacy, "req-c1 and req-c2 have no period snapshot")
 }
+
+// TestSettleSkipsQuotaAdjustmentAcrossPeriodReset verifies that an old-period reservation
+// (e.g. pre-consumed 150) settling in a new period (after reset with new usage 100)
+// with actual usage 50 (delta -100) does NOT erase the new period's 100 usage.
+func TestSettleSkipsQuotaAdjustmentAcrossPeriodReset(t *testing.T) {
+	truncateTables(t)
+	// sub.LastResetTime=200 > record.SubscriptionResetTime=100 → period moved.
+	seedTerminalSub(t, 528, 1000, 100, 200)
+	require.NoError(t, DB.Create(&SubscriptionPreConsumeRecord{
+		RequestId: "req-cross-period-settle", UserId: 1, UserSubscriptionId: 528,
+		PreConsumed: 150, Status: "consumed", SubscriptionResetTime: 100,
+	}).Error)
+
+	require.NoError(t, SettleSubscriptionPreConsume("req-cross-period-settle", -100))
+	require.Equal(t, int64(100), getRefundSubUsed(t, 528), "new-period usage must not be erased by old-period negative delta settlement")
+	require.Equal(t, "settled", getTerminalRecord(t, "req-cross-period-settle").Status)
+}
+
+// TestReserveExtraSubscriptionQuotaAtomic covers atomic extra reserve and rollback across resets.
+func TestReserveExtraSubscriptionQuotaAtomic(t *testing.T) {
+	truncateTables(t)
+	seedTerminalSub(t, 529, 1000, 100, 100)
+	require.NoError(t, DB.Create(&SubscriptionPreConsumeRecord{
+		RequestId: "req-extra-reserve", UserId: 1, UserSubscriptionId: 529,
+		PreConsumed: 100, Status: "consumed", SubscriptionResetTime: 100,
+	}).Error)
+
+	// 1. Reserve extra 50
+	require.NoError(t, ReserveExtraSubscriptionQuota(529, "req-extra-reserve", 50))
+	require.Equal(t, int64(150), getRefundSubUsed(t, 529))
+	require.Equal(t, int64(50), getTerminalRecord(t, "req-extra-reserve").ExtraReserved)
+
+	// 2. Rollback extra 50
+	require.NoError(t, RollbackExtraSubscriptionQuota(529, "req-extra-reserve", 50))
+	require.Equal(t, int64(100), getRefundSubUsed(t, 529))
+	require.Equal(t, int64(0), getTerminalRecord(t, "req-extra-reserve").ExtraReserved)
+
+	// 3. Reject extra reserve across period reset
+	require.NoError(t, DB.Model(&UserSubscription{}).Where("id = ?", 529).Update("last_reset_time", 200).Error)
+	err := ReserveExtraSubscriptionQuota(529, "req-extra-reserve", 50)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "across subscription period reset")
+}
+

@@ -27,6 +27,10 @@ type scannedString struct {
 	truncated bool
 }
 
+func (s scannedString) MarshalJSON() ([]byte, error) {
+	return json.Marshal(s.value)
+}
+
 type imageSourceKind uint8
 
 const (
@@ -86,11 +90,19 @@ func normalizedPath(path string) string {
 	return strings.TrimSuffix(strings.SplitN(path, "?", 2)[0], "/")
 }
 
+type RewriterOffsets struct {
+	ToolsRange  [2]int64
+	ToolsValue  any
+	ChoiceRange [2]int64
+	ChoiceValue any
+}
+
 type jsonStreamParser struct {
 	reader           *bufio.Reader
 	offset           int64
 	nodes            int
 	previewRemaining int
+	offsets          *RewriterOffsets
 }
 
 func newJSONStreamParser(reader io.Reader) *jsonStreamParser {
@@ -190,9 +202,23 @@ func (p *jsonStreamParser) parseObject(depth int) (map[string]any, error) {
 		if colon != ':' {
 			return nil, fmt.Errorf("missing colon after object key %q", keyToken.value)
 		}
+		if err := p.skipSpace(); err != nil {
+			return nil, err
+		}
+		valStart := p.offset
 		value, err := p.parseValue(depth)
 		if err != nil {
 			return nil, err
+		}
+		valEnd := p.offset
+		if p.offsets != nil && depth == 1 {
+			if keyToken.value == "tools" {
+				p.offsets.ToolsRange = [2]int64{valStart, valEnd}
+				p.offsets.ToolsValue = value
+			} else if keyToken.value == "tool_choice" {
+				p.offsets.ChoiceRange = [2]int64{valStart, valEnd}
+				p.offsets.ChoiceValue = value
+			}
 		}
 		object[keyToken.value] = value
 		if err := p.skipSpace(); err != nil {

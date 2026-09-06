@@ -14,6 +14,7 @@ import (
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/QuantumNous/new-api/setting/system_setting"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type Option struct {
@@ -287,17 +288,13 @@ func UpdateOption(key string, value string) error {
 	}
 	// Save to database first
 	option := Option{
-		Key: key,
+		Key:   key,
+		Value: value,
 	}
-	// https://gorm.io/docs/update.html#Save-All-Fields
-	if err := DB.FirstOrCreate(&option, Option{Key: key}).Error; err != nil {
-		return err
-	}
-	option.Value = value
-	// Save is a combination function.
-	// If save value does not contain primary key, it will execute Create,
-	// otherwise it will execute Update (with all fields).
-	if err := DB.Save(&option).Error; err != nil {
+	if err := DB.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "key"}},
+		DoUpdates: clause.AssignmentColumns([]string{"value"}),
+	}).Create(&option).Error; err != nil {
 		return err
 	}
 	// Update OptionMap
@@ -317,12 +314,16 @@ func UpdateTrafficControlAuthoritative(cfg common.TrafficControlConfig, expected
 
 	var newRevision uint64
 	var values map[string]string
+	var isNoop bool
 
 	err := DB.Transaction(func(tx *gorm.DB) error {
-		var revOption Option
-		if err := tx.Where(Option{Key: common.TrafficControlRevisionOption}).FirstOrCreate(&revOption).Error; err != nil {
+		if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&Option{
+			Key:   common.TrafficControlRevisionOption,
+			Value: "0",
+		}).Error; err != nil {
 			return err
 		}
+		var revOption Option
 		if err := lockForUpdate(tx).Where("key = ?", common.TrafficControlRevisionOption).First(&revOption).Error; err != nil {
 			return err
 		}
@@ -332,9 +333,35 @@ func UpdateTrafficControlAuthoritative(cfg common.TrafficControlConfig, expected
 				currentRevision = parsed
 			}
 		}
-		if expectedRevision != nil && *expectedRevision != currentRevision {
-			return ErrTrafficControlConflict
+
+		var currentOptions []Option
+		if err := tx.Where("key IN ?", common.TrafficControlOptionKeys).Find(&currentOptions).Error; err != nil {
+			return err
 		}
+		currentMap := make(map[string]string, len(currentOptions))
+		for _, opt := range currentOptions {
+			currentMap[opt.Key] = opt.Value
+		}
+		currentCfg, _ := common.TrafficControlConfigFromOptions(currentMap)
+
+		if expectedRevision != nil {
+			if *expectedRevision != currentRevision {
+				return ErrTrafficControlConflict
+			}
+			if currentRevision > 0 && currentCfg == cfg {
+				// 同 revision 同内容幂等
+				isNoop = true
+				return nil
+			}
+			// 同 revision 异内容升级
+		} else {
+			if currentRevision > 0 && currentCfg == cfg {
+				// 同内容幂等
+				isNoop = true
+				return nil
+			}
+		}
+
 		newRevision = currentRevision + 1
 
 		values = map[string]string{
@@ -349,12 +376,11 @@ func UpdateTrafficControlAuthoritative(cfg common.TrafficControlConfig, expected
 		}
 
 		for k, v := range values {
-			opt := Option{Key: k}
-			if err := tx.FirstOrCreate(&opt, Option{Key: k}).Error; err != nil {
-				return err
-			}
-			opt.Value = v
-			if err := tx.Save(&opt).Error; err != nil {
+			opt := Option{Key: k, Value: v}
+			if err := tx.Clauses(clause.OnConflict{
+				Columns:   []clause.Column{{Name: "key"}},
+				DoUpdates: clause.AssignmentColumns([]string{"value"}),
+			}).Create(&opt).Error; err != nil {
 				return err
 			}
 		}
@@ -362,6 +388,10 @@ func UpdateTrafficControlAuthoritative(cfg common.TrafficControlConfig, expected
 	})
 	if err != nil {
 		return common.GetTrafficControlMetrics(), err
+	}
+
+	if isNoop {
+		return common.GetTrafficControlMetrics(), nil
 	}
 
 	common.OptionMapRWMutex.Lock()
@@ -396,12 +426,11 @@ func UpdateOptionsBulk(values map[string]string) error {
 	}
 	err := DB.Transaction(func(tx *gorm.DB) error {
 		for k, v := range values {
-			option := Option{Key: k}
-			if err := tx.FirstOrCreate(&option, Option{Key: k}).Error; err != nil {
-				return err
-			}
-			option.Value = v
-			if err := tx.Save(&option).Error; err != nil {
+			opt := Option{Key: k, Value: v}
+			if err := tx.Clauses(clause.OnConflict{
+				Columns:   []clause.Column{{Name: "key"}},
+				DoUpdates: clause.AssignmentColumns([]string{"value"}),
+			}).Create(&opt).Error; err != nil {
 				return err
 			}
 		}

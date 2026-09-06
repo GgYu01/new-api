@@ -50,11 +50,14 @@ func referenceGuard(payload map[string]any) bool {
 	case nil:
 		return true
 	case string:
-		return v == "" || v == "auto"
+		if v == "none" {
+			return false
+		}
+		return true
 	case map[string]any:
-		return false
+		return true
 	default:
-		return false
+		return true
 	}
 }
 
@@ -66,8 +69,8 @@ func referenceDecision(body []byte) bool {
 	if !referenceGuard(payload) {
 		return false
 	}
-	imageSeen, plannerSeen := referenceScan(payload)
-	return imageSeen && !plannerSeen
+	imageSeen, _ := referenceScan(payload)
+	return imageSeen
 }
 
 var plannerToolForms = []string{
@@ -170,21 +173,69 @@ func TestRewriteEnvelopeOutputShape(t *testing.T) {
 	}
 }
 
-// TestRewriteVetoWhenPlannerPresentOrderIndependent pins that a client-defined
-// planner tool vetoes the rewrite regardless of its position in the array.
-func TestRewriteVetoWhenPlannerPresentOrderIndependent(t *testing.T) {
+// TestRewriteDeduplicatesAndEliminatesNativeImageWhenPlannerPresent tests that
+// native image tools are never exposed to CPA even when a planner tool is already present.
+func TestRewriteDeduplicatesAndEliminatesNativeImageWhenPlannerPresent(t *testing.T) {
 	image := `{"type":"image_generation"}`
 	planner := `{"type":"function","function":{"name":"__newapi_generate_gpt_image"}}`
 	for _, body := range [][]byte{
 		[]byte(`{"tools":[` + image + `,` + planner + `],"tool_choice":"auto"}`),
 		[]byte(`{"tools":[` + planner + `,` + image + `],"tool_choice":"auto"}`),
 	} {
-		if rewriteNeeded(body) {
-			t.Fatalf("planner veto failed for %s", body)
+		if !rewriteNeeded(body) {
+			t.Fatalf("rewrite should be needed to eliminate native image tool for %s", body)
 		}
-		_, changed, err := RewriteAutoImageToolForEnvelope(body, EnvelopeChat)
-		if err != nil || changed {
-			t.Fatalf("vetoed request must be returned unchanged (changed=%v err=%v)", changed, err)
+		rewritten, changed, err := RewriteAutoImageToolForEnvelope(body, EnvelopeChat)
+		if err != nil || !changed {
+			t.Fatalf("rewrite failed: changed=%v err=%v", changed, err)
+		}
+		text := string(rewritten)
+		if strings.Contains(text, `"image_generation"`) {
+			t.Fatalf("native image tool must be purged from tools array: %s", text)
+		}
+		if !strings.Contains(text, PlannerImageToolName) {
+			t.Fatalf("planner tool must remain in tools array: %s", text)
+		}
+	}
+}
+
+func TestRewriteAutoImageToolPreservesLargeIntegers(t *testing.T) {
+	body := []byte(`{"id":18446744073709551615,"model":"gpt-5.6-sol","tools":[{"type":"image_generation"}],"tool_choice":"auto"}`)
+	rewritten, changed, err := RewriteAutoImageToolForEnvelope(body, EnvelopeChat)
+	if err != nil || !changed {
+		t.Fatalf("rewrite failed: changed=%v err=%v", changed, err)
+	}
+	text := string(rewritten)
+	if !strings.Contains(text, "18446744073709551615") {
+		t.Fatalf("large integer 18446744073709551615 was corrupted or mangled: %s", text)
+	}
+}
+
+func TestRewriteAutoImageToolForcedToolChoice(t *testing.T) {
+	body := []byte(`{"tools":[{"type":"image_generation"}],"tool_choice":{"type":"function","function":{"name":"image_generation"}}}`)
+	rewritten, changed, err := RewriteAutoImageToolForEnvelope(body, EnvelopeChat)
+	if err != nil || !changed {
+		t.Fatalf("rewrite failed: changed=%v err=%v", changed, err)
+	}
+	text := string(rewritten)
+	if strings.Contains(text, `"image_generation"`) {
+		t.Fatalf("forced choice image_generation was not rewritten: %s", text)
+	}
+	if !strings.Contains(text, PlannerImageToolName) {
+		t.Fatalf("forced choice must name planner tool: %s", text)
+	}
+}
+
+func TestRewriteAutoImageToolParametersSchema(t *testing.T) {
+	body := []byte(`{"tools":[{"type":"image_generation"}],"tool_choice":"auto"}`)
+	rewritten, changed, err := RewriteAutoImageToolForEnvelope(body, EnvelopeResponses)
+	if err != nil || !changed {
+		t.Fatalf("rewrite failed: changed=%v err=%v", changed, err)
+	}
+	text := string(rewritten)
+	for _, expectedProp := range []string{"prompt", "size", "quality", "n", "image", "mask", "output_format"} {
+		if !strings.Contains(text, expectedProp) {
+			t.Fatalf("parameters schema missing property %q: %s", expectedProp, text)
 		}
 	}
 }
