@@ -30,7 +30,9 @@ func AlphaSearchHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError
 	case constant.ChannelTypeSub2API,
 		constant.ChannelTypeNewAPI,
 		constant.ChannelTypeCodex,
-		constant.ChannelTypeAdvancedCustom:
+		constant.ChannelTypeAdvancedCustom,
+		constant.ChannelTypeOpenAI,
+		constant.ChannelTypeCustom:
 	default:
 		// Allow retry onto another channel that may support this endpoint.
 		return types.NewError(
@@ -118,13 +120,28 @@ func AlphaSearchHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError
 	}
 
 	trimmed := bytes.TrimSpace(respBytes)
+
+	// Update info.UpstreamModelName if upstream returned an explicit model (e.g. from fallback)
+	if upstreamModel := gjson.GetBytes(trimmed, "model").String(); strings.TrimSpace(upstreamModel) != "" {
+		info.UpstreamModelName = strings.TrimSpace(upstreamModel)
+	}
+
 	// Billing: check if upstream provided explicit token usage
 	usage := &dto.Usage{}
 	if usageNode := gjson.GetBytes(trimmed, "usage"); usageNode.IsObject() {
 		_ = common.Unmarshal([]byte(usageNode.Raw), usage)
 	}
-	if usage.TotalTokens == 0 && usage.PromptTokens == 0 && usage.CompletionTokens == 0 {
-		// Upstream alpha search returned no token usage; bill one web_search_preview call plus prompt tokens estimate
+
+	// Tool billing: check if upstream specified search_call_count / tool_call_count
+	// Default to 1 (live search) unless explicitly 0 (e.g. pure conversation fallback)
+	var searchCallCount int64 = 1
+	if scNode := gjson.GetBytes(trimmed, "search_call_count"); scNode.Exists() {
+		searchCallCount = scNode.Int()
+	} else if tcNode := gjson.GetBytes(trimmed, "tool_call_count"); tcNode.Exists() {
+		searchCallCount = tcNode.Int()
+	}
+
+	if searchCallCount > 0 {
 		if info.ResponsesUsageInfo == nil {
 			info.ResponsesUsageInfo = &relaycommon.ResponsesUsageInfo{
 				BuiltInTools: make(map[string]*relaycommon.BuildInToolInfo),
@@ -135,8 +152,13 @@ func AlphaSearchHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError
 		}
 		info.ResponsesUsageInfo.BuiltInTools[dto.BuildInToolWebSearchPreview] = &relaycommon.BuildInToolInfo{
 			ToolName:  dto.BuildInToolWebSearchPreview,
-			CallCount: 1,
+			CallCount: int(searchCallCount),
 		}
+	} else if info.ResponsesUsageInfo != nil && info.ResponsesUsageInfo.BuiltInTools != nil {
+		delete(info.ResponsesUsageInfo.BuiltInTools, dto.BuildInToolWebSearchPreview)
+	}
+
+	if usage.TotalTokens == 0 && usage.PromptTokens == 0 && usage.CompletionTokens == 0 {
 		usage = service.ResponseText2Usage(c, outputText, info.UpstreamModelName, info.GetEstimatePromptTokens())
 	}
 

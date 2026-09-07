@@ -1,7 +1,6 @@
 package model
 
 import (
-	"errors"
 	"strconv"
 	"strings"
 	"time"
@@ -203,6 +202,11 @@ func InitOptionMap() {
 // migration marker is absent and never rewrites admin-customized values; once
 // the marker exists, restarts, syncs and upgrades leave every value untouched.
 func migrateTrafficControlDefaults() {
+	if setting.ModelRequestRateLimitEnabled {
+		setting.ModelRequestRateLimitEnabled = false
+		_ = UpdateOption("ModelRequestRateLimitEnabled", "false")
+	}
+
 	common.OptionMapRWMutex.RLock()
 	marker := common.OptionMap[common.TrafficControlDefaultsMigratedOption]
 	mode := common.OptionMap[common.TrafficControlModeOption]
@@ -301,7 +305,7 @@ func UpdateOption(key string, value string) error {
 	return updateOptionMap(key, value)
 }
 
-var ErrTrafficControlConflict = errors.New("traffic control config was changed concurrently, reload and retry")
+var ErrTrafficControlConflict = common.ErrTrafficControlConflict
 
 // UpdateTrafficControlAuthoritative is the authoritative path for traffic control
 // configuration. It compares the expected revision, writes all options including

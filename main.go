@@ -206,7 +206,7 @@ func main() {
 
 	srv := &http.Server{
 		Addr:    ":" + port,
-		Handler: server,
+		Handler: common.StallGuardRoot(server),
 	}
 
 	go func() {

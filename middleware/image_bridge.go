@@ -11,8 +11,6 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-
-
 // DetectImageBridge identifies public OpenAI-compatible image requests before
 // channel distribution. It stores only the compact routing intent; the
 // request-owned BodyStorage remains the source of truth for input images.
@@ -36,6 +34,13 @@ func DetectImageBridge() gin.HandlerFunc {
 
 		storage, err := common.GetBodyStorage(c)
 		if err != nil {
+			if common.IsRequestBodyStalledError(err) {
+				// Half-open client upload: fail the request fast with 408
+				// instead of holding the worker until the client's own
+				// timeout closes the connection.
+				abortWithOpenAiMessage(c, http.StatusRequestTimeout, fmt.Sprintf("request body stalled: %v", err))
+				return
+			}
 			abortWithOpenAiMessage(c, http.StatusBadRequest, fmt.Sprintf("invalid image bridge request: %v", err))
 			return
 		}

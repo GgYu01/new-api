@@ -302,3 +302,38 @@ func TestTrafficControllerAccepts1000ActiveAndRejects1001stImmediately(t *testin
 	require.NotNil(t, admitted)
 	admitted.Release()
 }
+
+func TestTrafficControllerMonotonicRevisionCheck(t *testing.T) {
+	start := time.Unix(0, 0)
+	cfg := DefaultTrafficControlConfig()
+	controller, err := NewTrafficController(cfg, start)
+	require.NoError(t, err)
+
+	// Apply revision 5 (higher than 0)
+	cfg5 := cfg
+	cfg5.MaxActiveRequests = 150
+	require.NoError(t, controller.UpdateConfigWithRevision(cfg5, 5, start))
+	require.Equal(t, uint64(5), controller.Metrics().Revision)
+	require.Equal(t, int64(150), controller.Config().MaxActiveRequests)
+
+	// Idempotent: same revision 5 with same config succeeds
+	require.NoError(t, controller.UpdateConfigWithRevision(cfg5, 5, start))
+	require.Equal(t, uint64(5), controller.Metrics().Revision)
+
+	// Conflict: same revision 5 with different config fails with ErrTrafficControlConflict
+	cfgConflict := cfg5
+	cfgConflict.MaxActiveRequests = 160
+	err = controller.UpdateConfigWithRevision(cfgConflict, 5, start)
+	require.ErrorIs(t, err, ErrTrafficControlConflict)
+
+	// Stale: lower revision (e.g. 4) fails with ErrTrafficControlConflict
+	err = controller.UpdateConfigWithRevision(cfg, 4, start)
+	require.ErrorIs(t, err, ErrTrafficControlConflict)
+
+	// Higher revision 6 succeeds
+	cfg6 := cfg5
+	cfg6.MaxActiveRequests = 200
+	require.NoError(t, controller.UpdateConfigWithRevision(cfg6, 6, start))
+	require.Equal(t, uint64(6), controller.Metrics().Revision)
+	require.Equal(t, int64(200), controller.Config().MaxActiveRequests)
+}

@@ -90,9 +90,18 @@ func normalizedPath(path string) string {
 	return strings.TrimSuffix(strings.SplitN(path, "?", 2)[0], "/")
 }
 
+type ToolSpanInfo struct {
+	Start            int64
+	End              int64
+	PrefixCommaStart int64
+	SuffixCommaEnd   int64
+	IsImageTool      bool
+	IsPlanner        bool
+}
+
 type RewriterOffsets struct {
 	ToolsRange  [2]int64
-	ToolsValue  any
+	ToolSpans   []ToolSpanInfo
 	ChoiceRange [2]int64
 	ChoiceValue any
 }
@@ -103,6 +112,8 @@ type jsonStreamParser struct {
 	nodes            int
 	previewRemaining int
 	offsets          *RewriterOffsets
+	currentKey       string
+	inTools          bool
 }
 
 func newJSONStreamParser(reader io.Reader) *jsonStreamParser {
@@ -111,6 +122,19 @@ func newJSONStreamParser(reader io.Reader) *jsonStreamParser {
 		previewRemaining: maxJSONPreviewBytes,
 	}
 }
+
+func (p *jsonStreamParser) isControlField() bool {
+	if p.inTools {
+		return true
+	}
+	switch p.currentKey {
+	case "type", "name", "tool_choice", "model", "tools", "modalities":
+		return true
+	default:
+		return false
+	}
+}
+
 
 func (p *jsonStreamParser) parseDocument() (any, error) {
 	if err := p.skipSpace(); err != nil {
@@ -206,15 +230,22 @@ func (p *jsonStreamParser) parseObject(depth int) (map[string]any, error) {
 			return nil, err
 		}
 		valStart := p.offset
+		prevKey := p.currentKey
+		p.currentKey = keyToken.value
+		prevInTools := p.inTools
+		if depth == 1 && keyToken.value == "tools" {
+			p.inTools = true
+		}
 		value, err := p.parseValue(depth)
+		valEnd := p.offset
+		p.currentKey = prevKey
+		p.inTools = prevInTools
 		if err != nil {
 			return nil, err
 		}
-		valEnd := p.offset
 		if p.offsets != nil && depth == 1 {
 			if keyToken.value == "tools" {
 				p.offsets.ToolsRange = [2]int64{valStart, valEnd}
-				p.offsets.ToolsValue = value
 			} else if keyToken.value == "tool_choice" {
 				p.offsets.ChoiceRange = [2]int64{valStart, valEnd}
 				p.offsets.ChoiceValue = value
@@ -290,23 +321,51 @@ func (p *jsonStreamParser) parseArray(depth int) ([]any, error) {
 	if err := p.unreadByte(); err != nil {
 		return nil, err
 	}
+
+	isToolsArray := p.offsets != nil && p.inTools && depth == 2
+	var lastCommaPos int64 = -1
 	for {
+		if err := p.skipSpace(); err != nil {
+			return nil, err
+		}
+		elemStart := p.offset
 		value, err := p.parseValue(depth)
 		if err != nil {
 			return nil, err
 		}
+		elemEnd := p.offset
+
+		span := ToolSpanInfo{
+			Start:            elemStart,
+			End:              elemEnd,
+			PrefixCommaStart: lastCommaPos,
+		}
+		if isToolsArray {
+			span.IsImageTool = isImageToolValue(value)
+			span.IsPlanner = isPlannerToolValue(value)
+		}
+
 		array = append(array, value)
 		if err := p.skipSpace(); err != nil {
 			return nil, err
 		}
+		separatorPos := p.offset
 		separator, err := p.readByte()
 		if err != nil {
 			return nil, err
 		}
 		switch separator {
 		case ']':
+			if isToolsArray {
+				p.offsets.ToolSpans = append(p.offsets.ToolSpans, span)
+			}
 			return array, nil
 		case ',':
+			if isToolsArray {
+				span.SuffixCommaEnd = p.offset
+				p.offsets.ToolSpans = append(p.offsets.ToolSpans, span)
+				lastCommaPos = separatorPos
+			}
 			continue
 		default:
 			return nil, fmt.Errorf("invalid array separator at byte %d", p.offset)
@@ -316,9 +375,15 @@ func (p *jsonStreamParser) parseArray(depth int) ([]any, error) {
 
 func (p *jsonStreamParser) parseString() (scannedString, error) {
 	start := p.offset
+	isControl := p.isControlField()
 	limit := maxJSONStringPreview
-	if p.previewRemaining < limit {
+	if isControl {
+		limit = maxJSONObjectKeyBytes
+	} else if p.previewRemaining < limit {
 		limit = p.previewRemaining
+		if limit < 0 {
+			limit = 0
+		}
 	}
 	rawPreview := make([]byte, 0, min(limit, 256))
 	escaped := false
@@ -344,12 +409,33 @@ func (p *jsonStreamParser) parseString() (scannedString, error) {
 	}
 	rawLength := p.offset - start - 1
 	truncated := rawLength > int64(len(rawPreview))
-	p.previewRemaining -= len(rawPreview)
+	if !isControl {
+		p.previewRemaining -= len(rawPreview)
+	}
 	value, err := decodeJSONStringPreview(rawPreview, truncated)
 	if err != nil {
 		return scannedString{}, err
 	}
 	return scannedString{value: value, rawOffset: start, rawLength: rawLength, truncated: truncated}, nil
+}
+
+func isImageToolValue(val any) bool {
+	toolMap, ok := val.(map[string]any)
+	if !ok {
+		return false
+	}
+	return isImageTool(toolMap)
+}
+
+func isPlannerToolValue(val any) bool {
+	toolMap, ok := val.(map[string]any)
+	if !ok {
+		return false
+	}
+	if name, ok := functionToolName(toolMap); ok && name == PlannerImageToolName {
+		return true
+	}
+	return false
 }
 
 func decodeJSONStringPreview(raw []byte, truncated bool) (string, error) {

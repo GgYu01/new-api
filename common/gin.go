@@ -74,7 +74,10 @@ func GetRequestBody(c *gin.Context) (io.Seeker, error) {
 
 	contentLength := c.Request.ContentLength
 
-	// Create request-owned replayable storage.
+	// Create request-owned replayable storage. Inbound body reads carry a
+	// no-progress deadline installed by common.StallGuardRoot at the server
+	// layer, so half-open client uploads fail fast instead of pinning the
+	// worker until the client's own timeout closes the connection.
 	storage, err := CreateBodyStorageFromReaderWithAdmission(
 		c.Request.Context(),
 		globalLargeBodyAdmission.Load(),

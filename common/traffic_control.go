@@ -1,6 +1,7 @@
 package common
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -197,6 +198,9 @@ func (t *TrafficController) UpdateConfig(cfg TrafficControlConfig, now time.Time
 	return nil
 }
 
+// ErrTrafficControlConflict is returned when an update conflicts with the current revision or state.
+var ErrTrafficControlConflict = errors.New("traffic control config was changed concurrently, reload and retry")
+
 // UpdateConfigWithRevision publishes a validated configuration along with an authoritative revision atomically.
 func (t *TrafficController) UpdateConfigWithRevision(cfg TrafficControlConfig, revision uint64, now time.Time) error {
 	if err := ValidateTrafficControlConfig(cfg); err != nil {
@@ -204,6 +208,18 @@ func (t *TrafficController) UpdateConfigWithRevision(cfg TrafficControlConfig, r
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
+
+	curRev := t.revision.Load()
+	if revision < curRev {
+		return fmt.Errorf("stale revision %d, current is %d: %w", revision, curRev, ErrTrafficControlConflict)
+	}
+	if revision == curRev {
+		if t.cfg == cfg {
+			return nil
+		}
+		return fmt.Errorf("revision %d conflict: content differs from existing config: %w", revision, ErrTrafficControlConflict)
+	}
+
 	old := t.cfg
 	if rpmEngaged(cfg.Mode) {
 		if rpmEngaged(old.Mode) && old.GlobalRPM > 0 && now.After(t.lastRefill) {

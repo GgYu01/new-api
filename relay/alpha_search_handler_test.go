@@ -1,11 +1,13 @@
 package relay
 
 import (
+	"bytes"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/tidwall/gjson"
 )
 
 func TestBuildAlphaSearchRequestBodyPreservesUnknownFields(t *testing.T) {
@@ -82,3 +84,37 @@ func TestValidateAlphaSearchResponseBody(t *testing.T) {
 	require.Nil(t, err)
 	assert.Equal(t, "Paris is the capital of France.", outputText)
 }
+
+func TestAlphaSearchResponseModelAndSearchCountExtraction(t *testing.T) {
+	// Test Tier 3 conversation fallback: search_call_count = 0
+	tier3JSON := []byte(`{
+		"output": "[Note: Real-time search is currently unavailable.]\n\nHello",
+		"model": "gpt-5-fallback",
+		"search_call_count": 0,
+		"usage": {
+			"prompt_tokens": 15,
+			"completion_tokens": 25,
+			"total_tokens": 40
+		}
+	}`)
+	outputText, valErr := validateAlphaSearchResponseBody(tier3JSON)
+	require.Nil(t, valErr)
+	assert.Contains(t, outputText, "Hello")
+
+	trimmed := bytes.TrimSpace(tier3JSON)
+	assert.Equal(t, "gpt-5-fallback", gjson.GetBytes(trimmed, "model").String())
+	assert.Equal(t, int64(0), gjson.GetBytes(trimmed, "search_call_count").Int())
+	assert.Equal(t, int64(40), gjson.GetBytes(trimmed, "usage.total_tokens").Int())
+
+	// Test Tier 2 web search fallback: search_call_count = 1
+	tier2JSON := []byte(`{
+		"output": "Search result for query",
+		"model": "gpt-5",
+		"search_call_count": 1
+	}`)
+	outputText2, valErr2 := validateAlphaSearchResponseBody(tier2JSON)
+	require.Nil(t, valErr2)
+	assert.Equal(t, "Search result for query", outputText2)
+	assert.Equal(t, int64(1), gjson.GetBytes(tier2JSON, "search_call_count").Int())
+}
+

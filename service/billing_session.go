@@ -57,8 +57,22 @@ func (s *BillingSession) Settle(actualQuota int) error {
 	// 1) 调整资金来源（仅在尚未提交时执行，防止重复调用）。delta==0 也调用，
 	// 让订阅资金来源写入数据库终态（标记 settled）；钱包对 0 差额是 no-op。
 	if !s.fundingSettled {
-		if err := s.funding.Settle(delta); err != nil {
-			return err
+		if sub, ok := s.funding.(*SubscriptionFunding); ok && sub.requestId != "" {
+			var tokenDelta int64
+			var tokenId int
+			var tokenKey string
+			if !s.relayInfo.IsPlayground && delta != 0 {
+				tokenId = s.relayInfo.TokenId
+				tokenKey = s.relayInfo.TokenKey
+				tokenDelta = int64(delta)
+			}
+			if err := model.SettleSubscriptionPreConsumeWithToken(sub.requestId, int64(delta), tokenId, tokenKey, tokenDelta); err != nil {
+				return err
+			}
+		} else {
+			if err := s.funding.Settle(delta); err != nil {
+				return err
+			}
 		}
 		s.fundingSettled = true
 	}
@@ -70,9 +84,15 @@ func (s *BillingSession) Settle(actualQuota int) error {
 			// 资金来源已提交，令牌调整失败记录日志并返回错误，等待重试补扣；不标记 settled=true
 			common.SysLog(fmt.Sprintf("error adjusting token quota after funding settled (userId=%d, tokenId=%d, delta=%d): %s",
 				s.relayInfo.UserId, s.relayInfo.TokenId, delta, tokenErr.Error()))
+			if sub, ok := s.funding.(*SubscriptionFunding); ok && sub.requestId != "" {
+				_ = model.RecordPendingTokenSettlement(sub.requestId, s.relayInfo.TokenId, s.relayInfo.TokenKey, int64(delta))
+			}
 			return tokenErr
 		}
 		s.tokenSettled = true
+		if sub, ok := s.funding.(*SubscriptionFunding); ok && sub.requestId != "" {
+			_ = model.MarkTokenSettled(sub.requestId)
+		}
 	} else {
 		s.tokenSettled = true
 	}

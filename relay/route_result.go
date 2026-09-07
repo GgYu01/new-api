@@ -27,6 +27,10 @@ const (
 	BackendCPACodex         ExecutionBackend   = "cpa_codex"
 	BackendC2AImage         ExecutionBackend   = "c2a_image"
 	BackendCPAXAI           ExecutionBackend   = "cpa_xai"
+	BackendCPAAntigravity   ExecutionBackend   = "cpa_antigravity"
+	ProviderGoogleGemini    ProviderFamily     = "google_gemini"
+	ProviderAntigravity     ProviderFamily     = "antigravity"
+	ProviderAnthropic       ProviderFamily     = "anthropic"
 )
 
 type RouteRequest struct {
@@ -55,12 +59,22 @@ func ClassifyRoute(req RouteRequest) (RouteResult, error) {
 	family := req.SubscriptionFamily
 	model := strings.ToLower(strings.TrimSpace(req.RequestedModel))
 	modelGrok := strings.HasPrefix(model, "grok")
+	modelClaude := strings.HasPrefix(model, "claude")
+	modelGemini := strings.HasPrefix(model, "gemini")
+	modelGPTOss := strings.HasPrefix(model, "gpt-oss")
+
 	if family != "" && family != SubscriptionGPT && family != SubscriptionGrok {
 		return RouteResult{}, fmt.Errorf("unsupported subscription family %q", family)
 	}
-	if (family == SubscriptionGPT && modelGrok) || (family == SubscriptionGrok && !modelGrok && model != "") {
+	if family == SubscriptionGPT {
+		if modelGrok || modelClaude || modelGemini || modelGPTOss {
+			return RouteResult{}, fmt.Errorf("model %q is outside %s subscription scope", req.RequestedModel, family)
+		}
+	}
+	if family == SubscriptionGrok && !modelGrok && model != "" {
 		return RouteResult{}, fmt.Errorf("model %q is outside %s subscription scope", req.RequestedModel, family)
 	}
+
 	result := RouteResult{
 		SubscriptionFamily: family,
 		RequestedModel:     req.RequestedModel,
@@ -72,8 +86,26 @@ func ClassifyRoute(req RouteRequest) (RouteResult, error) {
 	isImageEndpoint := endpoint == "/v1/images" || strings.HasPrefix(endpoint, "/v1/images/")
 	isLegacyTextEdits := endpoint == "/v1/edits" || strings.HasPrefix(endpoint, "/v1/edits/")
 
-	if family == SubscriptionGrok {
-		result.ProviderFamily, result.ExecutionBackend = ProviderXAI, BackendCPAXAI
+	// Determine ProviderFamily
+	if req.ChannelProvider != "" {
+		result.ProviderFamily = req.ChannelProvider
+	} else if family == SubscriptionGrok || modelGrok {
+		result.ProviderFamily = ProviderXAI
+	} else if modelGemini {
+		result.ProviderFamily = ProviderGoogleGemini
+	} else if modelClaude {
+		result.ProviderFamily = ProviderAnthropic
+	} else if modelGPTOss {
+		result.ProviderFamily = ProviderAntigravity
+	} else if family == SubscriptionGPT || strings.HasPrefix(model, "gpt") || strings.HasPrefix(model, "o1") || strings.HasPrefix(model, "o3") || strings.HasPrefix(model, "chatgpt") || strings.HasPrefix(model, "text-") || strings.HasPrefix(model, "dall-e") || strings.HasPrefix(model, "tts-") || strings.HasPrefix(model, "whisper-") {
+		result.ProviderFamily = ProviderOpenAICodex
+	} else {
+		result.ProviderFamily = ProviderOpenAICodex
+	}
+
+	// Route XAI / Grok
+	if result.ProviderFamily == ProviderXAI || family == SubscriptionGrok || modelGrok {
+		result.ExecutionBackend = BackendCPAXAI
 		switch {
 		case strings.Contains(endpoint, "/videos"):
 			result.OperationClass = OperationVideo
@@ -81,20 +113,33 @@ func ClassifyRoute(req RouteRequest) (RouteResult, error) {
 			result.OperationClass = OperationTTS
 		case isImageEndpoint || strings.Contains(model, "imagine-image"):
 			result.OperationClass = OperationImageGenerate
+		case req.InputHasImage:
+			result.OperationClass = OperationVisionText
 		default:
 			result.OperationClass = OperationText
 		}
 		return result, nil
 	}
 
-	if req.ChannelProvider != "" {
-		result.ProviderFamily = req.ChannelProvider
-	} else if family == SubscriptionGPT || strings.HasPrefix(model, "gpt") || strings.HasPrefix(model, "o1") || strings.HasPrefix(model, "o3") || strings.HasPrefix(model, "chatgpt") || strings.HasPrefix(model, "text-") || strings.HasPrefix(model, "dall-e") || strings.HasPrefix(model, "tts-") || strings.HasPrefix(model, "whisper-") {
-		result.ProviderFamily = ProviderOpenAICodex
-	} else {
-		result.ProviderFamily = ProviderOpenAICodex
+	// Route Gemini / Antigravity / Anthropic
+	if result.ProviderFamily == ProviderGoogleGemini || result.ProviderFamily == ProviderAntigravity || result.ProviderFamily == ProviderAnthropic || modelGemini || modelClaude || modelGPTOss {
+		result.ExecutionBackend = BackendCPAAntigravity
+		imageOutput := isImageEndpoint || strings.Contains(model, "-image") || imageToolSelected(req.ToolChoice) || hasImageModality(req.Modalities)
+		if imageOutput && (result.ProviderFamily == ProviderGoogleGemini || modelGemini) {
+			result.OperationClass = OperationImageGenerate
+			result.EffectiveModel = "gemini-3.1-flash-image"
+			result.BillingModel = "gemini-3.1-flash-image"
+			return result, nil
+		}
+		if req.InputHasImage {
+			result.OperationClass = OperationVisionText
+		} else {
+			result.OperationClass = OperationText
+		}
+		return result, nil
 	}
 
+	// Route OpenAI / Codex audio / realtime / legacy text edits
 	if strings.Contains(endpoint, "/audio/speech") {
 		result.OperationClass = OperationTTS
 		result.ExecutionBackend = BackendCPACodex
@@ -110,14 +155,13 @@ func ClassifyRoute(req RouteRequest) (RouteResult, error) {
 		result.ExecutionBackend = BackendCPACodex
 		return result, nil
 	}
-
-	// Legacy /v1/edits is historical text editing, not image editing.
 	if isLegacyTextEdits {
 		result.OperationClass = OperationText
 		result.ExecutionBackend = BackendCPACodex
 		return result, nil
 	}
 
+	// Route OpenAI / Codex image vs text
 	imageOutput := isImageEndpoint || strings.HasPrefix(model, "gpt-image") || imageToolSelected(req.ToolChoice) || hasImageModality(req.Modalities)
 	if imageOutput {
 		result.OperationClass, result.ExecutionBackend = OperationImageGenerate, BackendC2AImage

@@ -242,4 +242,3 @@ func BenchmarkDetectImageBridge_ImageGeneration(b *testing.B) {
 		DetectImageBridge()(context)
 	}
 }
-

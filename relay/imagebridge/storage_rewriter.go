@@ -144,8 +144,7 @@ func DetectAndRewriteJSONStorage(storage common.BodyStorage, envelope Envelope) 
 
 	_, err = parser.parseDocument()
 	if err != nil {
-		// If JSON parsing fails, return original storage to let downstream validator reject it
-		return storage, false, nil
+		return storage, false, fmt.Errorf("invalid json in image tool detection: %w", err)
 	}
 
 	// If tool_choice is "none", tools rewriting is disabled
@@ -157,26 +156,6 @@ func DetectAndRewriteJSONStorage(storage common.BodyStorage, envelope Envelope) 
 
 	var spans []replacementSpan
 	deltaSize := int64(0)
-
-	// Inspect tools
-	if offsets.ToolsRange[1] > offsets.ToolsRange[0] && offsets.ToolsValue != nil {
-		if toolsList, ok := offsets.ToolsValue.([]any); ok {
-			newTools, changed := rewriteTools(toolsList, envelope)
-			if changed {
-				newToolsBytes, err := json.Marshal(newTools)
-				if err != nil {
-					return storage, false, err
-				}
-				oldLen := offsets.ToolsRange[1] - offsets.ToolsRange[0]
-				spans = append(spans, replacementSpan{
-					start:       offsets.ToolsRange[0],
-					end:         offsets.ToolsRange[1],
-					replacement: newToolsBytes,
-				})
-				deltaSize += int64(len(newToolsBytes)) - oldLen
-			}
-		}
-	}
 
 	// Inspect tool_choice
 	if offsets.ChoiceRange[1] > offsets.ChoiceRange[0] && offsets.ChoiceValue != nil {
@@ -196,8 +175,91 @@ func DetectAndRewriteJSONStorage(storage common.BodyStorage, envelope Envelope) 
 		}
 	}
 
+	// Inspect tools: replace ONLY the image tool element spans!
+	if len(offsets.ToolSpans) > 0 {
+		hasImageTool := false
+		plannerPresent := false
+		for _, s := range offsets.ToolSpans {
+			if s.IsPlanner {
+				plannerPresent = true
+			}
+			if s.IsImageTool {
+				hasImageTool = true
+			}
+		}
+
+		if hasImageTool {
+			plannerInserted := plannerPresent
+			for _, s := range offsets.ToolSpans {
+				if !s.IsImageTool {
+					continue
+				}
+				if !plannerInserted {
+					// Replace first image tool with planner tool JSON
+					replacement := plannerToolJSON(envelope)
+					oldLen := s.End - s.Start
+					spans = append(spans, replacementSpan{
+						start:       s.Start,
+						end:         s.End,
+						replacement: replacement,
+					})
+					deltaSize += int64(len(replacement)) - oldLen
+					plannerInserted = true
+				} else {
+					// Drop redundant subsequent image tool element
+					var dropStart, dropEnd int64
+					if s.PrefixCommaStart >= 0 {
+						dropStart = s.PrefixCommaStart
+						dropEnd = s.End
+					} else if s.SuffixCommaEnd > 0 {
+						dropStart = s.Start
+						dropEnd = s.SuffixCommaEnd
+					} else {
+						dropStart = s.Start
+						dropEnd = s.End
+					}
+					oldLen := dropEnd - dropStart
+					spans = append(spans, replacementSpan{
+						start:       dropStart,
+						end:         dropEnd,
+						replacement: nil,
+					})
+					deltaSize -= oldLen
+				}
+			}
+		}
+	}
+
 	if len(spans) == 0 {
 		return storage, false, nil
+	}
+
+	sort.Slice(spans, func(i, j int) bool {
+		return spans[i].start < spans[j].start
+	})
+
+	var mergedSpans []replacementSpan
+	for _, sp := range spans {
+		if len(mergedSpans) == 0 {
+			mergedSpans = append(mergedSpans, sp)
+			continue
+		}
+		last := &mergedSpans[len(mergedSpans)-1]
+		if sp.start <= last.end {
+			if len(last.replacement) == 0 && len(sp.replacement) == 0 {
+				if sp.end > last.end {
+					last.end = sp.end
+				}
+				continue
+			}
+		}
+		mergedSpans = append(mergedSpans, sp)
+	}
+	spans = mergedSpans
+
+	deltaSize = int64(0)
+	for _, sp := range spans {
+		deltaSize += int64(len(sp.replacement)) - (sp.end - sp.start)
 	}
 
 	// Rewriting needed: stream through offsetReplacementReader into new storage
@@ -227,3 +289,27 @@ func DetectAndRewriteJSONStorage(storage common.BodyStorage, envelope Envelope) 
 	_ = storage.Close()
 	return newStorage, true, nil
 }
+
+func plannerToolJSON(envelope Envelope) []byte {
+	var tool any
+	if envelope == EnvelopeResponses {
+		tool = map[string]any{
+			"type":        "function",
+			"name":        PlannerImageToolName,
+			"description": "Generate, edit, or create variations of images using AI",
+			"parameters":  plannerImageToolParameters(),
+		}
+	} else {
+		tool = map[string]any{
+			"type": "function",
+			"function": map[string]any{
+				"name":        PlannerImageToolName,
+				"description": "Generate, edit, or create variations of images using AI",
+				"parameters":  plannerImageToolParameters(),
+			},
+		}
+	}
+	b, _ := json.Marshal(tool)
+	return b
+}
+

@@ -183,3 +183,99 @@ func TestDetectAndRewriteJSONStorage_DifferentialMemoryVsDisk(t *testing.T) {
 	require.NoError(t, json.Unmarshal(diskBytes, &diskParsed))
 	assert.Equal(t, memParsed, diskParsed)
 }
+
+func TestDetectAndRewriteJSONStorage_LargeToolDescriptionPreserved(t *testing.T) {
+	largeDesc := strings.Repeat("x", 40017)
+	payload := map[string]any{
+		"model": "gpt-4o",
+		"tools": []any{
+			map[string]any{
+				"type": "function",
+				"function": map[string]any{
+					"name":        "big_tool",
+					"description": largeDesc,
+					"parameters": map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"input": map[string]any{"type": "string"},
+						},
+					},
+				},
+			},
+			map[string]any{"type": "image_generation"},
+		},
+		"messages": []any{
+			map[string]any{"role": "user", "content": "hello"},
+		},
+	}
+	payloadBytes, err := json.Marshal(payload)
+	require.NoError(t, err)
+
+	storage, err := common.CreateBodyStorage(payloadBytes)
+	require.NoError(t, err)
+	defer storage.Close()
+
+	rewrittenStorage, changed, err := imagebridge.DetectAndRewriteJSONStorage(storage, imagebridge.EnvelopeChat)
+	require.NoError(t, err)
+	require.True(t, changed)
+	defer rewrittenStorage.Close()
+
+	rewrittenBytes, err := rewrittenStorage.Bytes()
+	require.NoError(t, err)
+
+	var parsed map[string]any
+	require.NoError(t, json.Unmarshal(rewrittenBytes, &parsed))
+	tools, ok := parsed["tools"].([]any)
+	require.True(t, ok)
+	require.Len(t, tools, 2)
+
+	// Verify the big_tool description is completely intact (40017 bytes, not truncated to 32768)
+	tool0 := tools[0].(map[string]any)
+	fn0 := tool0["function"].(map[string]any)
+	desc := fn0["description"].(string)
+	assert.Equal(t, 40017, len(desc), "description must not be truncated to 32KiB")
+	assert.Equal(t, largeDesc, desc)
+}
+
+func TestDetectAndRewriteJSONStorage_ExhaustedPreviewBudgetStillRewritesImageTool(t *testing.T) {
+	// 65 strings of 32 KiB = 2,080 KiB > 2 MiB preview budget
+	paddingStrings := make([]string, 65)
+	for i := range paddingStrings {
+		paddingStrings[i] = strings.Repeat("P", 32*1024)
+	}
+
+	payload := map[string]any{
+		"model":    "gpt-4o",
+		"paddings": paddingStrings,
+		"tools": []any{
+			map[string]any{"type": "image_generation"},
+		},
+		"messages": []any{
+			map[string]any{"role": "user", "content": "draw an owl"},
+		},
+	}
+	payloadBytes, err := json.Marshal(payload)
+	require.NoError(t, err)
+
+	storage, err := common.CreateBodyStorage(payloadBytes)
+	require.NoError(t, err)
+	defer storage.Close()
+
+	rewrittenStorage, changed, err := imagebridge.DetectAndRewriteJSONStorage(storage, imagebridge.EnvelopeChat)
+	require.NoError(t, err)
+	require.True(t, changed, "image_generation tool must be rewritten even if preview budget was exhausted by earlier strings")
+	defer rewrittenStorage.Close()
+
+	rewrittenBytes, err := rewrittenStorage.Bytes()
+	require.NoError(t, err)
+
+	var parsed map[string]any
+	require.NoError(t, json.Unmarshal(rewrittenBytes, &parsed))
+	tools, ok := parsed["tools"].([]any)
+	require.True(t, ok)
+	require.Len(t, tools, 1)
+	tool0 := tools[0].(map[string]any)
+	fn0 := tool0["function"].(map[string]any)
+	assert.Equal(t, imagebridge.PlannerImageToolName, fn0["name"])
+}
+

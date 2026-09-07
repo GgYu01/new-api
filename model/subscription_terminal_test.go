@@ -152,8 +152,9 @@ func TestClassifySubscriptionPreConsumeRecordsCountsStates(t *testing.T) {
 	seedRefundRecord(t, "req-s1", 527, 10, "settled")
 	seedRefundRecord(t, "req-r1", 527, 10, "refunded")
 
-	consumed, settled, refunded, pendingRefund, legacy, err := ClassifySubscriptionPreConsumeRecords()
+	consumed, settled, refunded, pendingRefund, legacy, incomplete, err := ClassifySubscriptionPreConsumeRecords()
 	require.NoError(t, err)
+	require.False(t, incomplete)
 	require.Equal(t, int64(3), consumed)
 	require.Equal(t, int64(1), settled)
 	require.Equal(t, int64(1), refunded)
@@ -197,10 +198,94 @@ func TestReserveExtraSubscriptionQuotaAtomic(t *testing.T) {
 	require.Equal(t, int64(100), getRefundSubUsed(t, 529))
 	require.Equal(t, int64(0), getTerminalRecord(t, "req-extra-reserve").ExtraReserved)
 
+	// Duplicate rollback should be a no-op (idempotent) and not subtract quota again
+	require.NoError(t, RollbackExtraSubscriptionQuota(529, "req-extra-reserve", 50))
+	require.Equal(t, int64(100), getRefundSubUsed(t, 529), "duplicate rollback must not subtract quota again")
+	require.Equal(t, int64(0), getTerminalRecord(t, "req-extra-reserve").ExtraReserved)
+
 	// 3. Reject extra reserve across period reset
 	require.NoError(t, DB.Model(&UserSubscription{}).Where("id = ?", 529).Update("last_reset_time", 200).Error)
 	err := ReserveExtraSubscriptionQuota(529, "req-extra-reserve", 50)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "across subscription period reset")
 }
+
+func TestRecoverPendingTokenSettlements(t *testing.T) {
+	truncateTables(t)
+	token := Token{
+		UserId:         1,
+		Key:            "sk-test-pending-rec",
+		RemainQuota:    1000,
+		UnlimitedQuota: false,
+	}
+	require.NoError(t, DB.Create(&token).Error)
+
+	seedTerminalSub(t, 530, 10000, 500, 100)
+	record := SubscriptionPreConsumeRecord{
+		RequestId:          "req-pending-tok",
+		UserId:             1,
+		UserSubscriptionId: 530,
+		PreConsumed:        100,
+		Status:             "settled",
+		TokenId:            token.Id,
+		TokenKey:           token.Key,
+		TokenDelta:         50,
+		TokenSettled:       false,
+	}
+	require.NoError(t, DB.Create(&record).Error)
+	now := GetDBTimestamp()
+	require.NoError(t, DB.Model(&SubscriptionPreConsumeRecord{}).Where("request_id = ?", "req-pending-tok").UpdateColumn("updated_at", now-100).Error)
+
+	recovered, err := RecoverPendingTokenSettlements(1, 10)
+	require.NoError(t, err)
+	require.Equal(t, 1, recovered)
+
+	var updatedRecord SubscriptionPreConsumeRecord
+	require.NoError(t, DB.Where("request_id = ?", "req-pending-tok").First(&updatedRecord).Error)
+	require.True(t, updatedRecord.TokenSettled)
+
+	var updatedToken Token
+	require.NoError(t, DB.Where("id = ?", token.Id).First(&updatedToken).Error)
+	require.Equal(t, 950, updatedToken.RemainQuota)
+}
+
+func TestSettleSubscriptionPreConsumeWithTokenAndTerminalRollback(t *testing.T) {
+	truncateTables(t)
+	token := Token{
+		UserId:         1,
+		Key:            "sk-test-settle-tok",
+		RemainQuota:    2000,
+		UnlimitedQuota: false,
+	}
+	require.NoError(t, DB.Create(&token).Error)
+
+	seedTerminalSub(t, 531, 10000, 500, 100)
+	record := SubscriptionPreConsumeRecord{
+		RequestId:          "req-settle-tok",
+		UserId:             1,
+		UserSubscriptionId: 531,
+		PreConsumed:        100,
+		ExtraReserved:      50,
+		Status:             "consumed",
+	}
+	require.NoError(t, DB.Create(&record).Error)
+
+	// Settle with token delta
+	err := SettleSubscriptionPreConsumeWithToken("req-settle-tok", 20, token.Id, token.Key, 20)
+	require.NoError(t, err)
+
+	var settledRecord SubscriptionPreConsumeRecord
+	require.NoError(t, DB.Where("request_id = ?", "req-settle-tok").First(&settledRecord).Error)
+	require.Equal(t, "settled", settledRecord.Status)
+	require.Equal(t, token.Id, settledRecord.TokenId)
+	require.Equal(t, token.Key, settledRecord.TokenKey)
+	require.Equal(t, int64(20), settledRecord.TokenDelta)
+	require.False(t, settledRecord.TokenSettled)
+
+	// Rolling back an already settled record must be a no-op
+	err = RollbackExtraSubscriptionQuota(531, "req-settle-tok", 50)
+	require.NoError(t, err)
+	require.Equal(t, int64(50), getTerminalRecord(t, "req-settle-tok").ExtraReserved)
+}
+
 

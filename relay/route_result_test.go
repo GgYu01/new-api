@@ -44,4 +44,66 @@ func TestClassifyRouteRejectsCrossSubscriptionModels(t *testing.T) {
 	require.Error(t, err)
 	_, err = ClassifyRoute(RouteRequest{SubscriptionFamily: SubscriptionGrok, RequestedModel: "gpt-5.6-sol"})
 	require.Error(t, err)
+	// GPT scope must reject non-GPT models: Claude, Gemini, GPT-OSS
+	_, err = ClassifyRoute(RouteRequest{SubscriptionFamily: SubscriptionGPT, RequestedModel: "claude-opus-4-6"})
+	require.Error(t, err, "GPT subscription must reject Claude models")
+	_, err = ClassifyRoute(RouteRequest{SubscriptionFamily: SubscriptionGPT, RequestedModel: "gemini-3-flash"})
+	require.Error(t, err, "GPT subscription must reject Gemini models")
+	_, err = ClassifyRoute(RouteRequest{SubscriptionFamily: SubscriptionGPT, RequestedModel: "gpt-oss-120b"})
+	require.Error(t, err, "GPT subscription must reject GPT-OSS models")
 }
+
+func TestClassifyRouteGeminiAndAntigravityProviders(t *testing.T) {
+	// 1. Gemini image generation -> gemini-3.1-flash-image on BackendCPAAntigravity (NOT C2A!)
+	res, err := ClassifyRoute(RouteRequest{
+		Endpoint:        "/v1/images/generations",
+		RequestedModel: "gemini-3.1-flash-image-preview",
+		ChannelProvider: ProviderGoogleGemini,
+	})
+	require.NoError(t, err)
+	require.Equal(t, BackendCPAAntigravity, res.ExecutionBackend)
+	require.Equal(t, OperationImageGenerate, res.OperationClass)
+	require.Equal(t, "gemini-3.1-flash-image", res.EffectiveModel)
+	require.Equal(t, "gemini-3.1-flash-image", res.BillingModel)
+
+	// 2. Gemini vision text -> BackendCPAAntigravity (NOT Codex!)
+	res, err = ClassifyRoute(RouteRequest{
+		Endpoint:       "/v1/chat/completions",
+		RequestedModel: "gemini-3-flash",
+		InputHasImage:  true,
+	})
+	require.NoError(t, err)
+	require.Equal(t, BackendCPAAntigravity, res.ExecutionBackend)
+	require.Equal(t, OperationVisionText, res.OperationClass)
+
+	// 3. Unrestricted Grok -> BackendCPAXAI (NOT Codex!)
+	res, err = ClassifyRoute(RouteRequest{
+		SubscriptionFamily: "",
+		Endpoint:           "/v1/chat/completions",
+		RequestedModel:     "grok-4.6",
+	})
+	require.NoError(t, err)
+	require.Equal(t, BackendCPAXAI, res.ExecutionBackend)
+	require.Equal(t, OperationText, res.OperationClass)
+
+	// 4. Antigravity GPT-OSS -> BackendCPAAntigravity (NOT Codex!)
+	res, err = ClassifyRoute(RouteRequest{
+		SubscriptionFamily: "",
+		Endpoint:           "/v1/chat/completions",
+		RequestedModel:     "gpt-oss-120b",
+	})
+	require.NoError(t, err)
+	require.Equal(t, BackendCPAAntigravity, res.ExecutionBackend)
+	require.Equal(t, OperationText, res.OperationClass)
+
+	// 5. Antigravity Claude -> BackendCPAAntigravity (NOT Codex!)
+	res, err = ClassifyRoute(RouteRequest{
+		SubscriptionFamily: "",
+		Endpoint:           "/v1/chat/completions",
+		RequestedModel:     "claude-sonnet-4-6",
+	})
+	require.NoError(t, err)
+	require.Equal(t, BackendCPAAntigravity, res.ExecutionBackend)
+	require.Equal(t, OperationText, res.OperationClass)
+}
+
