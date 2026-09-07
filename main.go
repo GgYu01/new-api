@@ -204,6 +204,12 @@ func main() {
 		port = strconv.Itoa(*common.Port)
 	}
 
+	if window := common.RequestBodyStallWindow(); window > 0 {
+		common.SysLog(fmt.Sprintf("request body stall guard enabled: no-progress window %s (BODY_STALL_WINDOW)", window))
+	} else {
+		common.SysLog("request body stall guard disabled (BODY_STALL_WINDOW=0)")
+	}
+
 	srv := &http.Server{
 		Addr:    ":" + port,
 		Handler: common.StallGuardRoot(server),

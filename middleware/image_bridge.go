@@ -8,6 +8,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/relay/imagebridge"
+	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/gin-gonic/gin"
 )
 
@@ -38,7 +39,7 @@ func DetectImageBridge() gin.HandlerFunc {
 				// Half-open client upload: fail the request fast with 408
 				// instead of holding the worker until the client's own
 				// timeout closes the connection.
-				abortWithOpenAiMessage(c, http.StatusRequestTimeout, fmt.Sprintf("request body stalled: %v", err))
+				abortWithOpenAiMessage(c, http.StatusRequestTimeout, fmt.Sprintf("request body stalled: %v", err), types.ErrorCodeRequestBodyStalled)
 				return
 			}
 			abortWithOpenAiMessage(c, http.StatusBadRequest, fmt.Sprintf("invalid image bridge request: %v", err))

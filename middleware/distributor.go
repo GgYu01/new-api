@@ -41,6 +41,12 @@ func Distribute() func(c *gin.Context) {
 			requestPath = intent.UpstreamPath()
 		}
 		if err != nil {
+			if common.IsRequestBodyStalledError(err) {
+				// Half-open client upload detected while spooling the body:
+				// fail fast with the stable stall code instead of a generic 400.
+				abortWithOpenAiMessage(c, http.StatusRequestTimeout, err.Error(), types.ErrorCodeRequestBodyStalled)
+				return
+			}
 			abortWithOpenAiMessage(c, http.StatusBadRequest, i18n.T(c, i18n.MsgDistributorInvalidRequest, map[string]any{"Error": err.Error()}))
 			return
 		}

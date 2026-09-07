@@ -2,6 +2,7 @@ package common
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -243,6 +244,56 @@ func newDiskStorageFromReader(reader io.Reader, maxBytes int64, initialReservati
 	return newDiskStorageFromPrefixAndReader(nil, reader, maxBytes, initialReservation, cachePath)
 }
 
+// copyBodyBufPool mirrors the 32 KiB staging buffer io.Copy would otherwise
+// lease from its own pool, so per-request allocation behavior stays the same.
+var copyBodyBufPool = sync.Pool{
+	New: func() any {
+		buf := make([]byte, 32*1024)
+		return &buf
+	},
+}
+
+// copyInboundBodyToDisk streams an inbound client body into replayable disk
+// storage while keeping the failure origin distinguishable in logs: a client
+// that stopped sending (stall), a canceled request, a slow/broken client
+// connection, and a local disk that refused bytes are different failures and
+// must not all be reported as "failed to write to temp file". Wrapped stall
+// errors keep their root cause via %w so callers can classify them with
+// errors.Is / common.IsRequestBodyStalledError.
+func copyInboundBodyToDisk(w io.Writer, r io.Reader) (int64, error) {
+	bufp := copyBodyBufPool.Get().(*[]byte)
+	buf := *bufp
+	defer copyBodyBufPool.Put(bufp)
+
+	var written int64
+	for {
+		n, readErr := r.Read(buf)
+		if n > 0 {
+			wn, writeErr := w.Write(buf[:n])
+			written += int64(wn)
+			if writeErr != nil {
+				return written, fmt.Errorf("failed to write to temp file: %w", writeErr)
+			}
+			if wn != n {
+				return written, io.ErrShortWrite
+			}
+		}
+		if readErr == io.EOF {
+			return written, nil
+		}
+		if readErr != nil {
+			switch {
+			case errors.Is(readErr, ErrRequestBodyStalled):
+				return written, fmt.Errorf("request body read stalled: %w", readErr)
+			case errors.Is(readErr, context.Canceled), errors.Is(readErr, context.DeadlineExceeded):
+				return written, fmt.Errorf("request body read canceled: %w", readErr)
+			default:
+				return written, fmt.Errorf("failed to read request body from client: %w", readErr)
+			}
+		}
+	}
+}
+
 func newDiskStorageFromPrefixAndReader(prefix []byte, reader io.Reader, maxBytes int64, initialReservation int64, _ string) (*diskStorage, error) {
 	if int64(len(prefix)) > maxBytes || initialReservation > maxBytes {
 		return nil, ErrRequestBodyTooLarge
@@ -281,10 +332,9 @@ func newDiskStorageFromPrefixAndReader(prefix []byte, reader io.Reader, maxBytes
 
 	// Stream only the remaining permitted bytes plus one sentinel byte. This
 	// bounds heap use when Content-Length is missing or incorrect.
-	_, err = io.Copy(writer, io.LimitReader(reader, maxBytes-writer.written+1))
-	if err != nil {
+	if _, err = copyInboundBodyToDisk(writer, io.LimitReader(reader, maxBytes-writer.written+1)); err != nil {
 		removePartial()
-		return nil, fmt.Errorf("failed to write to temp file: %w", err)
+		return nil, err
 	}
 	written := writer.written
 	if written > maxBytes {

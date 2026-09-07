@@ -70,6 +70,12 @@ func geminiRelayHandler(c *gin.Context, info *relaycommon.RelayInfo) *types.NewA
 }
 
 func requestBodyStorageErrorStatus(c *gin.Context, err error) (int, bool) {
+	if common.IsRequestBodyStalledError(err) {
+		// Half-open client upload: the body never completed, so this request
+		// cannot be retried upstream. Report the neutral stall code instead of
+		// a generic 400 so callers can tell it apart from malformed payloads.
+		return http.StatusRequestTimeout, true
+	}
 	if common.IsRequestBodyTooLargeError(err) || errors.Is(err, common.ErrRequestBodyTooLarge) {
 		return http.StatusRequestEntityTooLarge, true
 	}

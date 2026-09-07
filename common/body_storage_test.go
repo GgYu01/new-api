@@ -2,12 +2,15 @@ package common
 
 import (
 	"bytes"
+	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -463,4 +466,77 @@ func BenchmarkCreateBodyStorageFromUnknownLengthLarge(b *testing.B) {
 			b.Fatal(err)
 		}
 	}
+}
+
+type errReader func([]byte) (int, error)
+
+func (f errReader) Read(p []byte) (int, error) { return f(p) }
+
+type failingWriter struct{ limit int }
+
+func (w *failingWriter) Write(p []byte) (int, error) {
+	if len(p) > w.limit {
+		n := w.limit
+		w.limit = 0
+		return n, errors.New("disk on fire")
+	}
+	w.limit -= len(p)
+	return len(p), nil
+}
+
+func TestCopyInboundBodyToDiskClassifiesFailures(t *testing.T) {
+	t.Run("happy path writes everything", func(t *testing.T) {
+		var out bytes.Buffer
+		n, err := copyInboundBodyToDisk(&out, strings.NewReader("hello world"))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if n != int64(len("hello world")) || out.String() != "hello world" {
+			t.Fatalf("n=%d out=%q", n, out.String())
+		}
+	})
+
+	t.Run("stall keeps root cause and says read stalled", func(t *testing.T) {
+		_, err := copyInboundBodyToDisk(io.Discard, errReader(func(p []byte) (int, error) {
+			return 0, fmt.Errorf("no body data for 10s: %w", ErrRequestBodyStalled)
+		}))
+		if err == nil || !strings.Contains(err.Error(), "request body read stalled") {
+			t.Fatalf("expected stalled classification, got %v", err)
+		}
+		if !IsRequestBodyStalledError(err) {
+			t.Fatalf("stall root cause must survive wrapping: %v", err)
+		}
+	})
+
+	t.Run("cancel is distinct from disk failure", func(t *testing.T) {
+		_, err := copyInboundBodyToDisk(io.Discard, errReader(func(p []byte) (int, error) {
+			return 0, context.Canceled
+		}))
+		if err == nil || !strings.Contains(err.Error(), "request body read canceled") {
+			t.Fatalf("expected cancel classification, got %v", err)
+		}
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("cancel root cause must survive wrapping: %v", err)
+		}
+	})
+
+	t.Run("client connection failure is not reported as disk failure", func(t *testing.T) {
+		_, err := copyInboundBodyToDisk(io.Discard, errReader(func(p []byte) (int, error) {
+			return 0, errors.New("connection reset by peer")
+		}))
+		if err == nil || !strings.Contains(err.Error(), "failed to read request body from client") {
+			t.Fatalf("expected source-read classification, got %v", err)
+		}
+		if strings.Contains(err.Error(), "failed to write to temp file") {
+			t.Fatalf("source-read failure must not be misattributed to disk: %v", err)
+		}
+	})
+
+	t.Run("destination write failure stays a write failure", func(t *testing.T) {
+		w := &failingWriter{limit: 4}
+		_, err := copyInboundBodyToDisk(w, strings.NewReader("0123456789"))
+		if err == nil || !strings.Contains(err.Error(), "failed to write to temp file") {
+			t.Fatalf("expected write classification, got %v", err)
+		}
+	})
 }
