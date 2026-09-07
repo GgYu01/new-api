@@ -125,3 +125,53 @@ func TestIsRequestBodyStalledError(t *testing.T) {
 		t.Fatal("wrapped stall must match")
 	}
 }
+
+// TestStallGuardRootBoundsDrainAfterEarlyAbort reproduces the half-open
+// client + early-abort case seen in production: the handler rejects the
+// request (401) without consuming the declared body, the client keeps the
+// socket open with the rest of the body unsent, and net/http drains the
+// unread remainder through its own transport reference before flushing the
+// response. The guard must bound that drain so the client learns the result
+// quickly instead of waiting for its own timeout.
+func TestStallGuardRootBoundsDrainAfterEarlyAbort(t *testing.T) {
+	t.Setenv("BODY_STALL_WINDOW", "300ms")
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reject := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte("unauthorized"))
+	})
+	srv := &http.Server{Handler: StallGuardRoot(reject)}
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() { _ = srv.Close() })
+
+	conn, err := net.DialTimeout("tcp", ln.Addr().String(), 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	req := "POST /v1/chat/completions HTTP/1.1\r\nHost: test\r\nContent-Type: application/json\r\nContent-Length: 100000\r\n\r\n{\"partial\":"
+	if _, err := conn.Write([]byte(req)); err != nil {
+		t.Fatal(err)
+	}
+
+	start := time.Now()
+	if err := conn.SetReadDeadline(time.Now().Add(6 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 2048)
+	n, err := conn.Read(buf)
+	if err != nil {
+		t.Fatalf("no response while drain blocked: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("early abort flushed too late: %s", elapsed)
+	}
+	if !strings.Contains(string(buf[:n]), "401") {
+		t.Fatalf("expected 401, got: %q", string(buf[:n]))
+	}
+}
