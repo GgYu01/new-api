@@ -258,16 +258,16 @@ func functionToolName(raw any) (string, bool) {
 }
 
 func isImageTool(tool map[string]any) bool {
-	if text := stringValue(tool["type"]); text == "image_generation" {
+	if text := stringValue(tool["type"]); text == "image_generation" || text == "image_edits" {
 		return true
 	}
 	if function, ok := tool["function"].(map[string]any); ok {
-		if name := stringValue(function["name"]); name == "image_generation" {
+		if name := stringValue(function["name"]); name == "image_generation" || name == "image_edits" {
 			return true
 		}
 	}
 	// Flat Responses-style encoding: {"type":"function","name":"..."}.
-	if name, ok := functionToolName(tool); ok && name == "image_generation" {
+	if name, ok := functionToolName(tool); ok && (name == "image_generation" || name == "image_edits") {
 		return true
 	}
 	return false

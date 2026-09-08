@@ -74,6 +74,9 @@ func requestBodyStorageErrorStatus(c *gin.Context, err error) (int, bool) {
 		// Half-open client upload: the body never completed, so this request
 		// cannot be retried upstream. Report the neutral stall code instead of
 		// a generic 400 so callers can tell it apart from malformed payloads.
+		if c != nil {
+			c.Header("Connection", "close")
+		}
 		return http.StatusRequestTimeout, true
 	}
 	if common.IsRequestBodyTooLargeError(err) || errors.Is(err, common.ErrRequestBodyTooLarge) {
@@ -123,6 +126,9 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 				c.Writer.Flush()
 				return
 			}
+			if newAPIError.StatusCode == http.StatusRequestTimeout {
+				c.Header("Connection", "close")
+			}
 			switch relayFormat {
 			case types.RelayFormatOpenAIRealtime:
 				helper.WssError(c, ws, newAPIError.ToOpenAIError())
@@ -135,6 +141,9 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 				c.JSON(newAPIError.StatusCode, gin.H{
 					"error": newAPIError.ToOpenAIError(),
 				})
+			}
+			if newAPIError.StatusCode == http.StatusRequestTimeout && c.Writer != nil {
+				c.Writer.Flush()
 			}
 		}
 	}()
@@ -261,6 +270,11 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			break
 		}
 
+		if c.Request != nil && c.Request.Context().Err() != nil {
+			newAPIError = types.NewErrorWithStatusCode(c.Request.Context().Err(), types.ErrorCodeInvalidRequest, http.StatusRequestTimeout, types.ErrOptionWithSkipRetry())
+			break
+		}
+
 		bodyStorage, bodyErr := common.GetBodyStorage(c)
 		if bodyErr != nil {
 			status := http.StatusBadRequest
@@ -268,6 +282,10 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 				status = mapped
 			}
 			newAPIError = types.NewErrorWithStatusCode(bodyErr, types.ErrorCodeReadRequestBodyFailed, status, types.ErrOptionWithSkipRetry())
+			break
+		}
+		if _, seekErr := bodyStorage.Seek(0, io.SeekStart); seekErr != nil {
+			newAPIError = types.NewErrorWithStatusCode(seekErr, types.ErrorCodeReadRequestBodyFailed, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
 			break
 		}
 		c.Request.Body = io.NopCloser(bodyStorage)
@@ -293,7 +311,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 
 		processChannelError(c, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, common.GetContextKeyString(c, constant.ContextKeyChannelKey), channel.GetAutoBan()), newAPIError)
 
-		if !shouldRetry(c, newAPIError, common.RetryTimes-retryParam.GetRetry()) {
+		if !shouldRetry(c, relayInfo, newAPIError, common.RetryTimes-retryParam.GetRetry()) {
 			break
 		}
 	}
@@ -366,6 +384,23 @@ func getChannel(c *gin.Context, info *relaycommon.RelayInfo, retryParam *service
 			AutoBan: &autoBanInt,
 		}, nil
 	}
+
+	if service.ShouldSkipRetryAfterChannelAffinityFailure(c) {
+		chID, _, active := service.GetUsedChannelAffinity(c)
+		if active && chID > 0 {
+			preferred, err := model.CacheGetChannel(chID)
+			if err == nil && preferred != nil && preferred.Status == common.ChannelStatusEnabled {
+				info.PriceData.GroupRatioInfo = helper.HandleGroupRatio(c, info)
+				newAPIError := middleware.SetupContextForSelectedChannel(c, preferred, info.OriginModelName)
+				if newAPIError != nil {
+					return nil, newAPIError
+				}
+				return preferred, nil
+			}
+			return nil, types.NewError(fmt.Errorf("pinned affinity channel #%d is no longer available", chID), types.ErrorCodeGetChannelFailed, types.ErrOptionWithSkipRetry())
+		}
+	}
+
 	channel, selectGroup, err := service.CacheGetRandomSatisfiedChannel(retryParam)
 	if err != nil {
 		return nil, types.NewError(fmt.Errorf("获取分组 %s 下模型 %s 的可用渠道失败（retry）: %s", selectGroup, info.OriginModelName, err.Error()), types.ErrorCodeGetChannelFailed, types.ErrOptionWithSkipRetry())
@@ -383,20 +418,23 @@ func getChannel(c *gin.Context, info *relaycommon.RelayInfo, retryParam *service
 	return channel, nil
 }
 
-func shouldRetry(c *gin.Context, openaiErr *types.NewAPIError, retryTimes int) bool {
+func shouldRetry(c *gin.Context, info *relaycommon.RelayInfo, openaiErr *types.NewAPIError, retryTimes int) bool {
 	if openaiErr == nil {
 		return false
 	}
-	if service.ShouldSkipRetryAfterChannelAffinityFailure(c) {
+	if c != nil && c.Writer != nil && c.Writer.Written() {
 		return false
 	}
-	if types.IsChannelError(openaiErr) {
-		return true
+	if info != nil && (info.HasSendResponse() || info.ReceivedResponseCount > 0) {
+		return false
 	}
 	if types.IsSkipRetryError(openaiErr) {
 		return false
 	}
-	if retryTimes <= 0 {
+	if c != nil && c.Request != nil && c.Request.Context().Err() != nil {
+		return false
+	}
+	if info != nil && info.RetryIndex >= 2 {
 		return false
 	}
 	if _, ok := c.Get("specific_channel_id"); ok {
@@ -406,13 +444,30 @@ func shouldRetry(c *gin.Context, openaiErr *types.NewAPIError, retryTimes int) b
 	if code >= 200 && code < 300 {
 		return false
 	}
-	if code < 100 || code > 599 {
-		return true
-	}
 	if operation_setting.IsAlwaysSkipRetryCode(openaiErr.GetErrorCode()) {
 		return false
 	}
-	return operation_setting.ShouldRetryByStatusCode(code)
+
+	isRetryable := types.IsChannelError(openaiErr) || code < 100 || code > 599 || operation_setting.ShouldRetryByStatusCode(code)
+	if !isRetryable {
+		return false
+	}
+
+	if service.ShouldSkipRetryAfterChannelAffinityFailure(c) {
+		retryCount := 0
+		if info != nil {
+			retryCount = info.RetryIndex
+		}
+		if !service.ShouldAllowSameChannelAffinityRetry(c, retryCount) {
+			return false
+		}
+		return true
+	}
+
+	if retryTimes <= 0 {
+		return false
+	}
+	return true
 }
 
 func processChannelError(c *gin.Context, channelError types.ChannelError, err *types.NewAPIError) {

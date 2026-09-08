@@ -171,8 +171,12 @@ var GeminiSafetySetting string
 var CohereSafetySetting string
 
 const (
-	RequestIdKey         = "X-Oneapi-Request-Id"
-	UpstreamRequestIdKey = "X-Upstream-Request-Id"
+	RequestIdKey                = "X-Oneapi-Request-Id"
+	UpstreamRequestIdKey        = "X-Upstream-Request-Id"
+	ClientRequestIdKey          = "X-Client-Request-Id"
+	ContextKeyExternalRequestId = "external_client_request_id"
+	ContextKeyTraceparent       = "external_traceparent"
+	ContextKeyTracestate        = "external_tracestate"
 )
 
 const (

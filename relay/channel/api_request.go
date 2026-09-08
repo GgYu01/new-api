@@ -313,6 +313,53 @@ func applyHeaderOverrideToRequest(req *http.Request, headerOverride map[string]s
 	}
 }
 
+func applyTracingHeaders(headers *http.Header, c *gin.Context, info *common.RelayInfo) {
+	if headers == nil || c == nil {
+		return
+	}
+	serverExecID := c.GetString(common2.RequestIdKey)
+	if serverExecID == "" && info != nil {
+		serverExecID = info.RequestId
+	}
+
+	retryIndex := 0
+	if info != nil {
+		retryIndex = info.RetryIndex
+	}
+
+	if serverExecID != "" {
+		headers.Set("X-Request-Id", fmt.Sprintf("%s-%d", serverExecID, retryIndex))
+		headers.Set("X-Execution-Id", serverExecID)
+		headers.Set("X-Attempt-Index", fmt.Sprintf("%d", retryIndex))
+	}
+
+	externalReqID := c.GetString(common2.ContextKeyExternalRequestId)
+	if externalReqID == "" && c.Request != nil && c.Request.Header != nil {
+		externalReqID = strings.TrimSpace(c.Request.Header.Get("X-Client-Request-Id"))
+	}
+	if externalReqID != "" {
+		headers.Set("X-Client-Request-Id", externalReqID)
+	} else if serverExecID != "" {
+		headers.Set("X-Client-Request-Id", serverExecID)
+	}
+
+	tp := c.GetString(common2.ContextKeyTraceparent)
+	if tp == "" && c.Request != nil && c.Request.Header != nil {
+		tp = strings.TrimSpace(c.Request.Header.Get("traceparent"))
+	}
+	if tp != "" {
+		headers.Set("traceparent", tp)
+	}
+
+	ts := c.GetString(common2.ContextKeyTracestate)
+	if ts == "" && c.Request != nil && c.Request.Header != nil {
+		ts = strings.TrimSpace(c.Request.Header.Get("tracestate"))
+	}
+	if ts != "" {
+		headers.Set("tracestate", ts)
+	}
+}
+
 func DoApiRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBody io.Reader) (*http.Response, error) {
 	fullRequestURL, err := a.GetRequestURL(info)
 	if err != nil {
@@ -329,6 +376,8 @@ func DoApiRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBody
 	if err != nil {
 		return nil, fmt.Errorf("setup request header failed: %w", err)
 	}
+	applyTracingHeaders(&headers, c, info)
+
 	// Apply header overrides after SetupRequestHeader so caller configuration
 	// has final precedence over defaults such as Authorization.
 	headerOverride, err := processHeaderOverride(info, c)
@@ -361,6 +410,8 @@ func DoFormRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBod
 	if err != nil {
 		return nil, fmt.Errorf("setup request header failed: %w", err)
 	}
+	applyTracingHeaders(&headers, c, info)
+
 	// Apply header overrides after SetupRequestHeader so caller configuration
 	// has final precedence over defaults such as Authorization.
 	headerOverride, err := processHeaderOverride(info, c)
@@ -385,6 +436,7 @@ func DoWssRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBody
 	if err != nil {
 		return nil, fmt.Errorf("setup request header failed: %w", err)
 	}
+	applyTracingHeaders(&targetHeader, c, info)
 	// Apply header overrides after SetupRequestHeader so caller configuration
 	// has final precedence over defaults such as Authorization.
 	headerOverride, err := processHeaderOverride(info, c)
@@ -662,8 +714,16 @@ func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 		))
 	}
 
-	if upID := resp.Header.Get(common2.RequestIdKey); upID != "" {
+	upID := resp.Header.Get(common2.UpstreamRequestIdKey)
+	if upID == "" {
+		upID = resp.Header.Get("X-Request-Id")
+	}
+	if upID == "" {
+		upID = resp.Header.Get(common2.RequestIdKey)
+	}
+	if upID != "" {
 		c.Set(common2.UpstreamRequestIdKey, upID)
+		c.Header(common2.UpstreamRequestIdKey, upID)
 	}
 
 	_ = req.Body.Close()

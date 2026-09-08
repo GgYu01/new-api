@@ -12,6 +12,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/pkg/cachex"
+	"github.com/bytedance/gopkg/util/gopool"
 	"github.com/samber/hot"
 	"github.com/shopspring/decimal"
 	"gorm.io/gorm"
@@ -1369,6 +1370,9 @@ func PreConsumeUserSubscription(requestId string, userId int, modelName string, 
 			return query.Error
 		}
 		if query.RowsAffected > 0 {
+			if existing.UserId != userId {
+				return errors.New("subscription pre-consume request_id user mismatch")
+			}
 			if existing.Status == "refunded" {
 				return errors.New("subscription pre-consume already refunded")
 			}
@@ -1442,6 +1446,9 @@ func PreConsumeUserSubscription(requestId string, userId int, modelName string, 
 			if err := tx.Create(record).Error; err != nil {
 				var dup SubscriptionPreConsumeRecord
 				if err2 := tx.Where("request_id = ?", requestId).First(&dup).Error; err2 == nil {
+					if dup.UserId != userId {
+						return errors.New("subscription pre-consume request_id user mismatch")
+					}
 					if dup.Status == "refunded" {
 						return errors.New("subscription pre-consume already refunded")
 					}
@@ -1788,28 +1795,81 @@ func RecoverPendingTokenSettlements(olderThanSeconds int64, limit int) (int, err
 	}
 	recovered := 0
 	for _, candidate := range records {
-		// Atomically claim the record to prevent duplicate processing
-		res := DB.Model(&SubscriptionPreConsumeRecord{}).
-			Where("id = ? AND token_settled = ?", candidate.Id, false).
-			Update("token_settled", true)
-		if res.Error != nil || res.RowsAffected == 0 {
+		var tokenDelta int64
+		var tokenId int
+		var tokenKey string
+
+		claimed := false
+		txErr := DB.Transaction(func(tx *gorm.DB) error {
+			var rec SubscriptionPreConsumeRecord
+			if err := lockForUpdate(tx).Where("id = ? AND token_settled = ?", candidate.Id, false).First(&rec).Error; err != nil {
+				if errors.Is(err, gorm.ErrRecordNotFound) {
+					return nil // already claimed/settled by concurrent sweep or request
+				}
+				return err
+			}
+
+			tokenDelta = rec.TokenDelta
+			tokenId = rec.TokenId
+			tokenKey = rec.TokenKey
+
+			res := tx.Model(&rec).Update("token_settled", true)
+			if res.Error != nil {
+				return res.Error
+			}
+			if res.RowsAffected == 0 {
+				return nil
+			}
+			claimed = true
+
+			if tokenDelta > 0 {
+				updates := map[string]interface{}{
+					"remain_quota":  gorm.Expr("remain_quota - ?", tokenDelta),
+					"used_quota":    gorm.Expr("used_quota + ?", tokenDelta),
+					"accessed_time": common.GetTimestamp(),
+				}
+				upRes := tx.Model(&Token{}).Where("id = ?", tokenId).Updates(updates)
+				if upRes.Error != nil {
+					return upRes.Error
+				}
+				if upRes.RowsAffected == 0 {
+					return fmt.Errorf("token %d not found or deleted during recovery", tokenId)
+				}
+			} else if tokenDelta < 0 {
+				quota := -tokenDelta
+				updates := map[string]interface{}{
+					"remain_quota":  gorm.Expr("remain_quota + ?", quota),
+					"used_quota":    gorm.Expr("used_quota - ?", quota),
+					"accessed_time": common.GetTimestamp(),
+				}
+				upRes := tx.Model(&Token{}).Where("id = ?", tokenId).Updates(updates)
+				if upRes.Error != nil {
+					return upRes.Error
+				}
+				if upRes.RowsAffected == 0 {
+					return fmt.Errorf("token %d not found or deleted during recovery", tokenId)
+				}
+			}
+			return nil
+		})
+
+		if txErr != nil {
+			common.SysLog(fmt.Sprintf("pending token settlement recovery failed (requestId=%s, tokenId=%d, delta=%d): %s",
+				candidate.RequestId, candidate.TokenId, candidate.TokenDelta, txErr.Error()))
+			continue
+		}
+		if !claimed {
 			continue
 		}
 
-		var tokenErr error
-		if candidate.TokenDelta > 0 {
-			tokenErr = DecreaseTokenQuota(candidate.TokenId, candidate.TokenKey, int(candidate.TokenDelta))
-		} else {
-			tokenErr = IncreaseTokenQuota(candidate.TokenId, candidate.TokenKey, int(-candidate.TokenDelta))
-		}
-		if tokenErr != nil {
-			common.SysLog(fmt.Sprintf("pending token settlement recovery failed (requestId=%s, tokenId=%d, delta=%d): %s",
-				candidate.RequestId, candidate.TokenId, candidate.TokenDelta, tokenErr.Error()))
-			// Revert claim on failure so subsequent sweeps can retry
-			_ = DB.Model(&SubscriptionPreConsumeRecord{}).
-				Where("id = ?", candidate.Id).
-				Update("token_settled", false)
-			continue
+		if common.RedisEnabled && tokenKey != "" {
+			gopool.Go(func() {
+				if tokenDelta > 0 {
+					_ = cacheDecrTokenQuota(tokenKey, tokenDelta)
+				} else if tokenDelta < 0 {
+					_ = cacheIncrTokenQuota(tokenKey, -tokenDelta)
+				}
+			})
 		}
 		recovered++
 	}

@@ -279,3 +279,119 @@ func TestDetectAndRewriteJSONStorage_ExhaustedPreviewBudgetStillRewritesImageToo
 	assert.Equal(t, imagebridge.PlannerImageToolName, fn0["name"])
 }
 
+func TestDetectAndRewriteJSONStorage_MultipleImageToolsAndExistingPlanner(t *testing.T) {
+	testCases := []struct {
+		name          string
+		inputTools    []map[string]any
+		expectedLen   int
+		expectedNames []string
+	}{
+		{
+			name: "two image tools, no planner",
+			inputTools: []map[string]any{
+				{"type": "image_generation"},
+				{"type": "image_edits"},
+			},
+			expectedLen:   1,
+			expectedNames: []string{imagebridge.PlannerImageToolName},
+		},
+		{
+			name: "planner first then two image tools",
+			inputTools: []map[string]any{
+				{"type": "function", "function": map[string]any{"name": imagebridge.PlannerImageToolName}},
+				{"type": "image_generation"},
+				{"type": "image_edits"},
+			},
+			expectedLen:   1,
+			expectedNames: []string{imagebridge.PlannerImageToolName},
+		},
+		{
+			name: "two image tools then planner",
+			inputTools: []map[string]any{
+				{"type": "image_generation"},
+				{"type": "image_edits"},
+				{"type": "function", "function": map[string]any{"name": imagebridge.PlannerImageToolName}},
+			},
+			expectedLen:   1,
+			expectedNames: []string{imagebridge.PlannerImageToolName},
+		},
+		{
+			name: "image tool, planner, then image tool",
+			inputTools: []map[string]any{
+				{"type": "image_generation"},
+				{"type": "function", "function": map[string]any{"name": imagebridge.PlannerImageToolName}},
+				{"type": "image_edits"},
+			},
+			expectedLen:   1,
+			expectedNames: []string{imagebridge.PlannerImageToolName},
+		},
+		{
+			name: "non-image, image tools, non-image with planner",
+			inputTools: []map[string]any{
+				{"type": "function", "function": map[string]any{"name": "weather"}},
+				{"type": "image_generation"},
+				{"type": "image_edits"},
+				{"type": "function", "function": map[string]any{"name": imagebridge.PlannerImageToolName}},
+				{"type": "function", "function": map[string]any{"name": "calc"}},
+			},
+			expectedLen:   3,
+			expectedNames: []string{"weather", imagebridge.PlannerImageToolName, "calc"},
+		},
+		{
+			name: "non-image, two image tools, non-image without planner",
+			inputTools: []map[string]any{
+				{"type": "function", "function": map[string]any{"name": "weather"}},
+				{"type": "image_generation"},
+				{"type": "image_edits"},
+				{"type": "function", "function": map[string]any{"name": "calc"}},
+			},
+			expectedLen:   3,
+			expectedNames: []string{"weather", imagebridge.PlannerImageToolName, "calc"},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			payload := map[string]any{
+				"model":    "gpt-4o",
+				"tools":    tc.inputTools,
+				"messages": []any{map[string]any{"role": "user", "content": "draw and edit"}},
+			}
+			payloadBytes, err := json.Marshal(payload)
+			require.NoError(t, err)
+
+			storage, err := common.CreateBodyStorage(payloadBytes)
+			require.NoError(t, err)
+			defer storage.Close()
+
+			rewrittenStorage, changed, err := imagebridge.DetectAndRewriteJSONStorage(storage, imagebridge.EnvelopeChat)
+			require.NoError(t, err)
+			require.True(t, changed)
+			defer rewrittenStorage.Close()
+
+			rewrittenBytes, err := rewrittenStorage.Bytes()
+			require.NoError(t, err)
+
+			// MUST be 100% valid JSON without parsing errors or syntax defects
+			var parsed map[string]any
+			err = json.Unmarshal(rewrittenBytes, &parsed)
+			require.NoError(t, err, "rewritten JSON must be valid: %s", string(rewrittenBytes))
+
+			tools, ok := parsed["tools"].([]any)
+			require.True(t, ok)
+			require.Len(t, tools, tc.expectedLen)
+
+			actualNames := make([]string, 0, len(tools))
+			for _, rt := range tools {
+				tm := rt.(map[string]any)
+				if fn, ok := tm["function"].(map[string]any); ok {
+					actualNames = append(actualNames, fn["name"].(string))
+				} else if name, ok := tm["name"].(string); ok {
+					actualNames = append(actualNames, name)
+				}
+			}
+			assert.Equal(t, tc.expectedNames, actualNames)
+		})
+	}
+}
+

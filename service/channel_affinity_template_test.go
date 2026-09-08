@@ -332,3 +332,39 @@ func TestChannelAffinityHitCodexTemplatePassHeadersEffective(t *testing.T) {
 	_, exists = info.RuntimeHeadersOverride["x-codex-turn-metadata"]
 	require.False(t, exists)
 }
+
+func TestChannelAffinityRetryDecoupling(t *testing.T) {
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+
+	// No affinity set initially
+	chID, group, active := GetUsedChannelAffinity(ctx)
+	require.False(t, active)
+	require.Equal(t, 0, chID)
+	require.Empty(t, group)
+	require.False(t, ShouldAllowSameChannelAffinityRetry(ctx, 0))
+
+	// Mark affinity used
+	setChannelAffinityContext(ctx, channelAffinityMeta{
+		RuleName:   "sticky-test",
+		SkipRetry:  true,
+		UsingGroup: "sub",
+		ModelName:  "gpt-5.4",
+	})
+	MarkChannelAffinityUsed(ctx, "sub", 42)
+
+	// Verify used affinity retrieval
+	chID, group, active = GetUsedChannelAffinity(ctx)
+	require.True(t, active)
+	require.Equal(t, 42, chID)
+	require.Equal(t, "sub", group)
+
+	// SkipRetry is still true for cross-channel switching
+	require.True(t, ShouldSkipRetryAfterChannelAffinityFailure(ctx))
+
+	// Same-channel retries: attempt 0 (first retry) and 1 (second retry) are allowed; >= 2 rejected
+	require.True(t, ShouldAllowSameChannelAffinityRetry(ctx, 0), "retry 0 should be allowed")
+	require.True(t, ShouldAllowSameChannelAffinityRetry(ctx, 1), "retry 1 should be allowed")
+	require.False(t, ShouldAllowSameChannelAffinityRetry(ctx, 2), "retry 2 should be rejected (max 2 retries)")
+	require.False(t, ShouldAllowSameChannelAffinityRetry(ctx, 3), "retry 3 should be rejected")
+}

@@ -91,7 +91,10 @@ func (s *BillingSession) Settle(actualQuota int) error {
 		}
 		s.tokenSettled = true
 		if sub, ok := s.funding.(*SubscriptionFunding); ok && sub.requestId != "" {
-			_ = model.MarkTokenSettled(sub.requestId)
+			if markErr := model.MarkTokenSettled(sub.requestId); markErr != nil {
+				common.SysLog(fmt.Sprintf("error marking token settled (requestId=%s): %s", sub.requestId, markErr.Error()))
+				return markErr
+			}
 		}
 	} else {
 		s.tokenSettled = true

@@ -175,7 +175,7 @@ func DetectAndRewriteJSONStorage(storage common.BodyStorage, envelope Envelope) 
 		}
 	}
 
-	// Inspect tools: replace ONLY the image tool element spans!
+	// Inspect tools: replace or drop image tool element spans without overlapping commas
 	if len(offsets.ToolSpans) > 0 {
 		hasImageTool := false
 		plannerPresent := false
@@ -189,35 +189,104 @@ func DetectAndRewriteJSONStorage(storage common.BodyStorage, envelope Envelope) 
 		}
 
 		if hasImageTool {
+			type toolAction int
+			const (
+				actKeep    toolAction = 0
+				actReplace toolAction = 1
+				actDrop    toolAction = 2
+			)
+
+			nTools := len(offsets.ToolSpans)
+			actions := make([]toolAction, nTools)
 			plannerInserted := plannerPresent
-			for _, s := range offsets.ToolSpans {
+
+			for i, s := range offsets.ToolSpans {
 				if !s.IsImageTool {
+					actions[i] = actKeep
 					continue
 				}
 				if !plannerInserted {
-					// Replace first image tool with planner tool JSON
-					replacement := plannerToolJSON(envelope)
-					oldLen := s.End - s.Start
-					spans = append(spans, replacementSpan{
-						start:       s.Start,
-						end:         s.End,
-						replacement: replacement,
-					})
-					deltaSize += int64(len(replacement)) - oldLen
+					actions[i] = actReplace
 					plannerInserted = true
 				} else {
-					// Drop redundant subsequent image tool element
-					var dropStart, dropEnd int64
-					if s.PrefixCommaStart >= 0 {
-						dropStart = s.PrefixCommaStart
-						dropEnd = s.End
-					} else if s.SuffixCommaEnd > 0 {
-						dropStart = s.Start
-						dropEnd = s.SuffixCommaEnd
-					} else {
-						dropStart = s.Start
-						dropEnd = s.End
+					actions[i] = actDrop
+				}
+			}
+
+			keptCount := 0
+			for _, act := range actions {
+				if act != actDrop {
+					keptCount++
+				}
+			}
+
+			if keptCount == 0 {
+				// All tools dropped: empty the array contents cleanly
+				dropStart := offsets.ToolSpans[0].Start
+				dropEnd := offsets.ToolSpans[nTools-1].End
+				oldLen := dropEnd - dropStart
+				spans = append(spans, replacementSpan{
+					start:       dropStart,
+					end:         dropEnd,
+					replacement: nil,
+				})
+				deltaSize -= oldLen
+			} else {
+				// 1. Add replacement spans for replaced tools
+				for i, act := range actions {
+					if act == actReplace {
+						s := offsets.ToolSpans[i]
+						replacement := plannerToolJSON(envelope)
+						oldLen := s.End - s.Start
+						spans = append(spans, replacementSpan{
+							start:       s.Start,
+							end:         s.End,
+							replacement: replacement,
+						})
+						deltaSize += int64(len(replacement)) - oldLen
 					}
+				}
+
+				// 2. Identify contiguous runs of dropped elements and compute exact non-overlapping drop boundaries
+				i := 0
+				for i < nTools {
+					if actions[i] != actDrop {
+						i++
+						continue
+					}
+					runStart := i
+					for i < nTools && actions[i] == actDrop {
+						i++
+					}
+					runEnd := i - 1
+
+					var dropStart, dropEnd int64
+					if runStart == 0 {
+						// Run starts at array beginning: drop elements and the trailing comma before the next element
+						dropStart = offsets.ToolSpans[0].Start
+						if offsets.ToolSpans[runEnd].SuffixCommaEnd > 0 {
+							dropEnd = offsets.ToolSpans[runEnd].SuffixCommaEnd
+						} else {
+							dropEnd = offsets.ToolSpans[runEnd].End
+						}
+					} else if runEnd == nTools-1 {
+						// Run ends at array end: drop the leading comma before runStart and elements up to end
+						if offsets.ToolSpans[runStart].PrefixCommaStart >= 0 {
+							dropStart = offsets.ToolSpans[runStart].PrefixCommaStart
+						} else {
+							dropStart = offsets.ToolSpans[runStart].Start
+						}
+						dropEnd = offsets.ToolSpans[nTools-1].End
+					} else {
+						// Run is in middle: keep the comma before runStart, drop from runStart.Start through runEnd.SuffixCommaEnd
+						dropStart = offsets.ToolSpans[runStart].Start
+						if offsets.ToolSpans[runEnd].SuffixCommaEnd > 0 {
+							dropEnd = offsets.ToolSpans[runEnd].SuffixCommaEnd
+						} else {
+							dropEnd = offsets.ToolSpans[runEnd].End
+						}
+					}
+
 					oldLen := dropEnd - dropStart
 					spans = append(spans, replacementSpan{
 						start:       dropStart,
