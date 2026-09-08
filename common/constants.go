@@ -174,6 +174,8 @@ const (
 	RequestIdKey                = "X-Oneapi-Request-Id"
 	UpstreamRequestIdKey        = "X-Upstream-Request-Id"
 	ClientRequestIdKey          = "X-Client-Request-Id"
+	TraceparentHeaderKey        = "traceparent"
+	TracestateHeaderKey         = "tracestate"
 	ContextKeyExternalRequestId = "external_client_request_id"
 	ContextKeyTraceparent       = "external_traceparent"
 	ContextKeyTracestate        = "external_tracestate"
