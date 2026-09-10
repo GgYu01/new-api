@@ -87,6 +87,18 @@ func Distribute() func(c *gin.Context) {
 			abortWithOpenAiMessage(c, http.StatusForbidden, i18n.T(c, i18n.MsgDistributorSubscriptionModelForbidden, map[string]any{"Model": modelRequest.Model}), types.ErrorCodeModelNotFound)
 			return
 		}
+		// Delisted models are a stable model_not_found, not a temporary no-channel
+		// 503. Enforce after subscription/key 403s and before token-specific or
+		// ordinary channel selection so those paths cannot serve or retry them.
+		if strings.TrimSpace(modelRequest.Model) != "" && service.IsDelistedModel(modelRequest.Model) {
+			abortWithOpenAiMessage(
+				c,
+				http.StatusNotFound,
+				fmt.Sprintf("The model '%s' does not exist or has been delisted", modelRequest.Model),
+				types.ErrorCodeModelNotFound,
+			)
+			return
+		}
 		if ok {
 			id, err := strconv.Atoi(channelId.(string))
 			if err != nil {
