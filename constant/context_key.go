@@ -71,6 +71,16 @@ const (
 	ContextKeyLanguage ContextKey = "language"
 	ContextKeyIsStream ContextKey = "is_stream"
 
+	// ContextKeyHeadersCommitted is true after HTTP headers or a legal SSE
+	// comment heartbeat have been written. It is not a semantic commit.
+	ContextKeyHeadersCommitted ContextKey = "headers_committed"
+	// ContextKeyKeepaliveOnly is true when the only body bytes so far are
+	// legal SSE comment heartbeats.
+	ContextKeyKeepaliveOnly ContextKey = "keepalive_only"
+	// ContextKeySemanticCommitted is true after text, tool, media, or a
+	// bound response ID has been exposed to the customer.
+	ContextKeySemanticCommitted ContextKey = "semantic_committed"
+
 	// ContextKeyAuditLogged marks that the current request has already recorded
 	// a manage/operation audit log inside the handler. When set, the admin-audit
 	// fallback in authHelper (finishAdminAudit) skips its record to avoid

@@ -422,7 +422,13 @@ func shouldRetry(c *gin.Context, info *relaycommon.RelayInfo, openaiErr *types.N
 	if openaiErr == nil {
 		return false
 	}
-	if c != nil && c.Writer != nil && c.Writer.Written() {
+	// Writer.Written() only means HTTP bytes left the process. Legal SSE
+	// comment heartbeats set headers_committed/keepalive_only and must not
+	// freeze recovery. Semantic text/tool/media/response IDs do.
+	if helper.SemanticCommitted(c) {
+		return false
+	}
+	if c != nil && c.Writer != nil && c.Writer.Written() && !common.GetContextKeyBool(c, constant.ContextKeyKeepaliveOnly) {
 		return false
 	}
 	if info != nil && (info.HasSendResponse() || info.ReceivedResponseCount > 0) {
