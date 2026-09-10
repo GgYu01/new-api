@@ -540,3 +540,26 @@ func TestCopyInboundBodyToDiskClassifiesFailures(t *testing.T) {
 		}
 	})
 }
+
+func TestCreateBodyStorageFromReaderTruncatesShortBody(t *testing.T) {
+	body := strings.NewReader(`{"partial":true`)
+	storage, err := CreateBodyStorageFromReader(body, 64, 1024)
+	if storage != nil {
+		_ = storage.Close()
+	}
+	if err == nil || !IsRequestBodyTruncatedError(err) {
+		t.Fatalf("want truncated, got storage=%v err=%v", storage, err)
+	}
+	if !strings.Contains(err.Error(), "declared_bytes=64") || !strings.Contains(err.Error(), "received_bytes=") {
+		t.Fatalf("missing byte evidence: %v", err)
+	}
+}
+
+func TestCreateBodyStorageFromReaderUnknownLengthEOFIsNotTruncated(t *testing.T) {
+	body := strings.NewReader(`{"ok":true}`)
+	storage, err := CreateBodyStorageFromReader(body, -1, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = storage.Close() })
+}

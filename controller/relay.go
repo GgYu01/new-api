@@ -79,6 +79,12 @@ func requestBodyStorageErrorStatus(c *gin.Context, err error) (int, bool) {
 		}
 		return http.StatusRequestTimeout, true
 	}
+	if common.IsRequestBodyTruncatedError(err) {
+		if c != nil {
+			c.Header("Connection", "close")
+		}
+		return http.StatusBadRequest, true
+	}
 	if common.IsRequestBodyTooLargeError(err) || errors.Is(err, common.ErrRequestBodyTooLarge) {
 		return http.StatusRequestEntityTooLarge, true
 	}

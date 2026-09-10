@@ -285,6 +285,8 @@ func copyInboundBodyToDisk(w io.Writer, r io.Reader) (int64, error) {
 			switch {
 			case errors.Is(readErr, ErrRequestBodyStalled):
 				return written, fmt.Errorf("request body read stalled: %w", readErr)
+			case errors.Is(readErr, ErrRequestBodyTruncated):
+				return written, fmt.Errorf("request body truncated: %w", readErr)
 			case errors.Is(readErr, context.Canceled), errors.Is(readErr, context.DeadlineExceeded):
 				return written, fmt.Errorf("request body read canceled: %w", readErr)
 			default:
@@ -476,8 +478,31 @@ func CreateBodyStorage(data []byte) (BodyStorage, error) {
 	return newMemoryStorage(data), nil
 }
 
+type inboundBodyReader struct {
+	r             io.Reader
+	declaredBytes int64
+	receivedBytes int64
+}
+
+func (r *inboundBodyReader) Read(p []byte) (int, error) {
+	n, err := r.r.Read(p)
+	r.receivedBytes += int64(n)
+	if err == io.EOF && r.declaredBytes > 0 && r.receivedBytes < r.declaredBytes {
+		return n, fmt.Errorf("%w: declared_bytes=%d received_bytes=%d", ErrRequestBodyTruncated, r.declaredBytes, r.receivedBytes)
+	}
+	return n, err
+}
+
+func wrapInboundBodyReader(reader io.Reader, contentLength int64) io.Reader {
+	if reader == nil {
+		return reader
+	}
+	return &inboundBodyReader{r: reader, declaredBytes: contentLength}
+}
+
 // CreateBodyStorageFromReader streams a reader into replayable body storage.
 func CreateBodyStorageFromReader(reader io.Reader, contentLength int64, maxBytes int64) (BodyStorage, error) {
+	reader = wrapInboundBodyReader(reader, contentLength)
 	threshold := GetDiskCacheThresholdBytes()
 	if maxBytes < 0 {
 		return nil, fmt.Errorf("max body size must not be negative")

@@ -96,8 +96,9 @@ func TestStallGuardRootPassesFullBody(t *testing.T) {
 
 func TestRequestBodyStallWindowParsing(t *testing.T) {
 	t.Setenv("BODY_STALL_WINDOW", "")
-	if got := RequestBodyStallWindow(); got != 10*time.Second {
-		t.Fatalf("default window = %s, want 10s", got)
+	t.Setenv("REQUEST_BODY_NO_PROGRESS_TIMEOUT", "")
+	if got := RequestBodyStallWindow(); got != 10*time.Minute {
+		t.Fatalf("default window = %s, want 10m", got)
 	}
 	t.Setenv("BODY_STALL_WINDOW", "0")
 	if got := RequestBodyStallWindow(); got != 0 {
@@ -108,8 +109,8 @@ func TestRequestBodyStallWindowParsing(t *testing.T) {
 		t.Fatalf("explicit window = %s, want 30s", got)
 	}
 	t.Setenv("BODY_STALL_WINDOW", "garbage")
-	if got := RequestBodyStallWindow(); got != 10*time.Second {
-		t.Fatalf("invalid window = %s, want fallback 10s", got)
+	if got := RequestBodyStallWindow(); got != 10*time.Minute {
+		t.Fatalf("invalid window = %s, want fallback 10m", got)
 	}
 }
 

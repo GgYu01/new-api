@@ -47,6 +47,10 @@ func Distribute() func(c *gin.Context) {
 				abortWithOpenAiMessage(c, http.StatusRequestTimeout, err.Error(), types.ErrorCodeRequestBodyStalled)
 				return
 			}
+			if common.IsRequestBodyTruncatedError(err) {
+				abortWithOpenAiMessage(c, http.StatusBadRequest, err.Error(), types.ErrorCodeRequestBodyTruncated)
+				return
+			}
 			abortWithOpenAiMessage(c, http.StatusBadRequest, i18n.T(c, i18n.MsgDistributorInvalidRequest, map[string]any{"Error": err.Error()}))
 			return
 		}

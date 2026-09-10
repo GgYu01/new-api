@@ -60,3 +60,16 @@ func TestRequestBodyStorageErrorStatusMapsStallTo408(t *testing.T) {
 	require.Equal(t, http.StatusRequestTimeout, status)
 	require.Empty(t, recorder.Header().Get("Retry-After"))
 }
+
+func TestRequestBodyStorageErrorStatusMapsTruncationTo400(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+
+	status, handled := requestBodyStorageErrorStatus(
+		c,
+		fmt.Errorf("disk storage creation failed: %w", common.ErrRequestBodyTruncated),
+	)
+
+	require.True(t, handled)
+	require.Equal(t, http.StatusBadRequest, status)
+}

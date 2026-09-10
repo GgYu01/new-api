@@ -42,6 +42,10 @@ func DetectImageBridge() gin.HandlerFunc {
 				abortWithOpenAiMessage(c, http.StatusRequestTimeout, fmt.Sprintf("request body stalled: %v", err), types.ErrorCodeRequestBodyStalled)
 				return
 			}
+			if common.IsRequestBodyTruncatedError(err) {
+				abortWithOpenAiMessage(c, http.StatusBadRequest, fmt.Sprintf("request body truncated: %v", err), types.ErrorCodeRequestBodyTruncated)
+				return
+			}
 			abortWithOpenAiMessage(c, http.StatusBadRequest, fmt.Sprintf("invalid image bridge request: %v", err))
 			return
 		}

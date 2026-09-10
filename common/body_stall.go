@@ -20,19 +20,27 @@ func IsRequestBodyStalledError(err error) bool {
 	return errors.Is(err, ErrRequestBodyStalled)
 }
 
+var (
+	// ErrRequestBodyTruncated is a known-length inbound body that ended before
+	// Content-Length was satisfied. Distinct from local no-progress stall.
+	ErrRequestBodyTruncated = errors.New("request body truncated")
+)
+
+func IsRequestBodyTruncatedError(err error) bool {
+	return errors.Is(err, ErrRequestBodyTruncated)
+}
+
 // RequestBodyStallWindow returns the no-progress window applied to inbound
-// POST bodies. Override with BODY_STALL_WINDOW (Go duration, e.g. "30s");
-// "0" disables the guard. Default 10s: generous for slow-but-alive uploads,
-// an order of magnitude tighter than the 60s client timeouts observed
-// stalling the image bridge with half-open uploads.
+// POST bodies. Override with BODY_STALL_WINDOW. Empty uses the timeout-ladder
+// REQUEST_BODY_NO_PROGRESS_TIMEOUT (default 10m). "0" disables the guard.
 func RequestBodyStallWindow() time.Duration {
 	raw := strings.TrimSpace(os.Getenv("BODY_STALL_WINDOW"))
 	if raw == "" {
-		return 10 * time.Second
+		return LoadTimeoutLadder().RequestBodyNoProgressTimeout
 	}
 	window, err := time.ParseDuration(raw)
 	if err != nil || window < 0 {
-		return 10 * time.Second
+		return LoadTimeoutLadder().RequestBodyNoProgressTimeout
 	}
 	return window
 }
