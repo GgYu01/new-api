@@ -21,6 +21,7 @@ import (
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/relay/imagebridge"
+	"github.com/QuantumNous/new-api/relay/lifecycle"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
@@ -427,6 +428,28 @@ func getChannel(c *gin.Context, info *relaycommon.RelayInfo, retryParam *service
 func shouldRetry(c *gin.Context, info *relaycommon.RelayInfo, openaiErr *types.NewAPIError, retryTimes int) bool {
 	if openaiErr == nil {
 		return false
+	}
+	if lr := lifecycle.FromContext(c); lr != nil {
+		ok, _ := lifecycle.CanRecover(lr, openaiErr, retryTimes)
+		if !ok {
+			return false
+		}
+		if c != nil && c.Request != nil && c.Request.Context().Err() != nil && lr.RootContext().Err() != nil {
+			return false
+		}
+		if _, pinned := c.Get("specific_channel_id"); pinned {
+			return false
+		}
+		if service.ShouldSkipRetryAfterChannelAffinityFailure(c) {
+			retryCount := 0
+			if info != nil {
+				retryCount = info.RetryIndex
+			}
+			if !service.ShouldAllowSameChannelAffinityRetry(c, retryCount) {
+				return false
+			}
+		}
+		return true
 	}
 	// Writer.Written() only means HTTP bytes left the process. Legal SSE
 	// comment heartbeats set headers_committed/keepalive_only and must not

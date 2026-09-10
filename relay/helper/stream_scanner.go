@@ -92,6 +92,12 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 	ctx, cancel := context.WithCancel(context.Background())
 
 	streamingTimeout := time.Duration(constant.StreamingTimeout) * time.Second
+	if streamingTimeout <= 0 {
+		streamingTimeout = common.LoadTimeoutLadder().UpstreamStreamNoProgressTimeout
+	}
+	if streamingTimeout <= 0 {
+		streamingTimeout = 10 * time.Minute
+	}
 
 	var (
 		stopChan    = make(chan bool, 3) // Buffer shutdown signals to avoid blocking.

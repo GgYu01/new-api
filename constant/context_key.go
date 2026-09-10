@@ -80,6 +80,7 @@ const (
 	// ContextKeySemanticCommitted is true after text, tool, media, or a
 	// bound response ID has been exposed to the customer.
 	ContextKeySemanticCommitted ContextKey = "semantic_committed"
+	ContextKeyLogicalRequest    ContextKey = "logical_request"
 
 	// ContextKeyAuditLogged marks that the current request has already recorded
 	// a manage/operation audit log inside the handler. When set, the admin-audit

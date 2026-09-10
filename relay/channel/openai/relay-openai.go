@@ -12,6 +12,7 @@ import (
 	"github.com/QuantumNous/new-api/relay/channel/openrouter"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relay/helper"
+	"github.com/QuantumNous/new-api/relay/lifecycle"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/relayconvert"
 	"github.com/QuantumNous/new-api/relaykit/types"
@@ -190,6 +191,10 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 	}
 
 	HandleFinalResponse(c, info, lastStreamData, responseId, createAt, model, systemFingerprint, usage, containStreamUsage)
+
+	if lr := lifecycle.FromContext(c); lr != nil && !lr.SemanticCommitted() {
+		return nil, types.NewError(fmt.Errorf("upstream SSE ended before semantic commit"), types.ErrorCodeBadResponse, types.ErrOptionWithStatusCode(http.StatusBadGateway))
+	}
 
 	return usage, nil
 }
