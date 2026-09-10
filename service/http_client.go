@@ -72,22 +72,23 @@ func ValidateSSRFProtectedFetchURL(urlStr string) error {
 }
 
 func newRelayHTTPTransport() *http.Transport {
+	ladder := common.LoadTimeoutLadder()
 	var transport *http.Transport
 	if defaultTransport, ok := http.DefaultTransport.(*http.Transport); ok && defaultTransport != nil {
 		transport = defaultTransport.Clone()
 	} else {
-		dialer := &net.Dialer{
-			Timeout:   30 * time.Second,
-			KeepAlive: 30 * time.Second,
-		}
 		transport = &http.Transport{
 			Proxy:                 http.ProxyFromEnvironment,
-			DialContext:           dialer.DialContext,
 			ForceAttemptHTTP2:     true,
-			TLSHandshakeTimeout:   10 * time.Second,
 			ExpectContinueTimeout: time.Second,
 		}
 	}
+	dialer := &net.Dialer{
+		Timeout:   ladder.UpstreamConnectTimeout,
+		KeepAlive: ladder.TCPKeepaliveIdle,
+	}
+	transport.DialContext = dialer.DialContext
+	transport.TLSHandshakeTimeout = ladder.UpstreamTLSHandshakeTimeout
 	transport.MaxIdleConns = common.RelayMaxIdleConns
 	transport.MaxIdleConnsPerHost = common.RelayMaxIdleConnsPerHost
 	transport.IdleConnTimeout = time.Duration(common.RelayIdleConnTimeout) * time.Second

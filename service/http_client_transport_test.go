@@ -11,6 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
@@ -488,4 +489,12 @@ func TestNormalizeHTTPTransportPolicyClampsWithoutPanic(t *testing.T) {
 	assert.Equal(t, HTTPTransportPolicy{Protocol: dto.HTTPProtocolAuto, Shards: 1}, NormalizeHTTPTransportPolicy(dto.ChannelSettings{HTTPProtocol: "http3"}))
 	assert.Equal(t, HTTPTransportPolicy{Protocol: dto.HTTPProtocolAuto, Shards: 1}, NormalizeHTTPTransportPolicy(dto.ChannelSettings{HTTP2ConnectionShards: -3}))
 	assert.Equal(t, HTTPTransportPolicy{Protocol: dto.HTTPProtocolAuto, Shards: 8}, NormalizeHTTPTransportPolicy(dto.ChannelSettings{HTTP2ConnectionShards: 99}))
+}
+
+func TestRelayHTTPTransportUsesTimeoutLadder(t *testing.T) {
+	t.Setenv("UPSTREAM_CONNECT_TIMEOUT", "15s")
+	t.Setenv("UPSTREAM_TLS_HANDSHAKE_TIMEOUT", "30s")
+	transport := newRelayHTTPTransport()
+	require.Equal(t, 30*time.Second, transport.TLSHandshakeTimeout)
+	assert.Equal(t, time.Duration(0), http.Client{Transport: transport}.Timeout)
 }

@@ -209,6 +209,7 @@ func main() {
 	} else {
 		common.SysLog("request body stall guard disabled (BODY_STALL_WINDOW=0)")
 	}
+	common.SysLog(common.TimeoutLadderStartupLog(common.LoadTimeoutLadder()))
 
 	srv := &http.Server{
 		Addr:    ":" + port,
