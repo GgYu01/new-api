@@ -7,6 +7,14 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestGetBuildInfoCarriesBuildID(t *testing.T) {
+	prevID := BuildID
+	t.Cleanup(func() { BuildID = prevID })
+	BuildID = "build-test-001"
+	info := GetBuildInfo()
+	require.Equal(t, "build-test-001", info.BuildID)
+}
+
 func TestGetBuildInfoEnvVersionIsRuntimeLabelOnly(t *testing.T) {
 	prevCompiled, prevOverride := CompiledVersion, RuntimeVersionOverride
 	t.Cleanup(func() {

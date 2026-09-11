@@ -11,6 +11,7 @@ var (
 	// 编译期通过 -ldflags "-X 'github.com/QuantumNous/new-api/common.BuildRevision=...'" 注入
 	CompiledVersion        = ""
 	BuildRevision          = ""
+	BuildID                = ""
 	BuildTime              = ""
 	BuildPlatform          = ""
 	RuntimeVersionOverride = ""
@@ -28,6 +29,7 @@ type BuildInfo struct {
 	CompiledVersion  string `json:"compiled_version"`
 	RuntimeOverride  string `json:"runtime_override,omitempty"`
 	Revision         string `json:"revision"`
+	BuildID          string `json:"build_id,omitempty"`
 	SnapshotID       string `json:"snapshot_id,omitempty"`
 	FrontendRevision string `json:"frontend_revision,omitempty"`
 	BuildTime        string `json:"build_time"`
@@ -62,6 +64,7 @@ func GetBuildInfo() BuildInfo {
 		CompiledVersion:  compiled,
 		RuntimeOverride:  RuntimeVersionOverride,
 		Revision:         BuildRevision,
+		BuildID:          BuildID,
 		SnapshotID:       os.Getenv("SNAPSHOT_ID"),
 		FrontendRevision: os.Getenv("FRONTEND_REVISION"),
 		BuildTime:        BuildTime,
