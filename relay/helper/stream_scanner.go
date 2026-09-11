@@ -6,14 +6,17 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/logger"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	"github.com/QuantumNous/new-api/relay/lifecycle"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 
@@ -116,6 +119,36 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 		})
 	}
 
+	// Stage-aware first-event timeout: silent upstream must fail fast instead
+	// of idling until the stream no-progress bound.
+	firstByteTimeout := common.LoadTimeoutLadder().UpstreamAttemptFirstEventTimeout
+	if lr := lifecycle.FromContext(c); lr != nil {
+		firstByteTimeout = lr.AttemptFirstEventTimeout()
+	} else if fbEnv := os.Getenv("FIRST_BYTE_TIMEOUT"); fbEnv != "" {
+		if d, err := time.ParseDuration(fbEnv); err == nil && d > 0 {
+			firstByteTimeout = d
+		}
+	}
+	if firstByteTimeout <= 0 {
+		firstByteTimeout = 10 * time.Minute
+	}
+	ttftTimer := time.NewTimer(firstByteTimeout)
+	var (
+		firstEventOnce sync.Once
+		hasFirstEvent  int32
+	)
+	markFirstEvent := func() {
+		firstEventOnce.Do(func() {
+			atomic.StoreInt32(&hasFirstEvent, 1)
+			if !ttftTimer.Stop() {
+				select {
+				case <-ttftTimer.C:
+				default:
+				}
+			}
+		})
+	}
+
 	generalSettings := operation_setting.GetGeneralSetting()
 	pingEnabled := generalSettings.PingIntervalEnabled && !info.DisablePing
 	pingInterval := time.Duration(generalSettings.PingIntervalSeconds) * time.Second
@@ -141,6 +174,7 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 				_ = resp.Body.Close()
 			}
 
+			ttftTimer.Stop()
 			ticker.Stop()
 			if pingTicker != nil {
 				pingTicker.Stop()
@@ -259,6 +293,7 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 			default:
 			}
 
+			markFirstEvent()
 			ticker.Reset(streamingTimeout)
 			data := scanner.Text()
 			logger.LogDebug(c, "stream scanner data: %s", data)
@@ -306,8 +341,12 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 		info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonEOF, nil)
 	})
 
-	// Wait for normal completion or downstream cancellation.
+	// Wait for first-event timeout, idle timeout, or downstream cancellation.
 	select {
+	case <-ttftTimer.C:
+		if atomic.LoadInt32(&hasFirstEvent) == 0 {
+			info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonTimeout, fmt.Errorf("ttft timeout: no first event within %s", firstByteTimeout))
+		}
 	case <-ticker.C:
 		info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonTimeout, nil)
 	case <-stopChan:
