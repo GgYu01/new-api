@@ -10,6 +10,14 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+func GetTimeoutLadder(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "",
+		"data":    common.LoadTimeoutLadder().View(),
+	})
+}
+
 func ListSystemInstances(c *gin.Context) {
 	instances, err := model.ListSystemInstances()
 	if err != nil {

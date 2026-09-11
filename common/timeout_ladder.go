@@ -118,6 +118,26 @@ func (l TimeoutLadder) AttemptFirstEventDeadline(rootRemaining time.Duration) ti
 	return d
 }
 
+func (l TimeoutLadder) View() map[string]any {
+	return map[string]any{
+		"REQUEST_BODY_NO_PROGRESS_TIMEOUT":     l.RequestBodyNoProgressTimeout.String(),
+		"NEWAPI_QUEUE_WAIT_TIMEOUT":            l.NewAPIQueueWaitTimeout.String(),
+		"UPSTREAM_CONNECT_TIMEOUT":             l.UpstreamConnectTimeout.String(),
+		"UPSTREAM_TLS_HANDSHAKE_TIMEOUT":       l.UpstreamTLSHandshakeTimeout.String(),
+		"UPSTREAM_ATTEMPT_FIRST_EVENT_TIMEOUT": l.UpstreamAttemptFirstEventTimeout.String(),
+		"PRECOMMIT_RECOVERY_BUDGET":            l.PrecommitRecoveryBudget.String(),
+		"UPSTREAM_STREAM_NO_PROGRESS_TIMEOUT":  l.UpstreamStreamNoProgressTimeout.String(),
+		"DOWNSTREAM_WRITE_NO_PROGRESS_TIMEOUT": l.DownstreamWriteNoProgressTimeout.String(),
+		"LOGICAL_REQUEST_MAX_LIFETIME":         l.LogicalRequestMaxLifetime.String(),
+		"GRACEFUL_DRAIN_TIMEOUT":               l.GracefulDrainTimeout.String(),
+		"SSE_HEARTBEAT_INTERVAL":               l.SSEHeartbeatInterval.String(),
+		"TCP_KEEPALIVE_IDLE":                   l.TCPKeepaliveIdle.String(),
+		"TCP_KEEPALIVE_INTERVAL":               l.TCPKeepaliveInterval.String(),
+		"TCP_KEEPALIVE_COUNT":                  l.TCPKeepaliveCount,
+		"MAX_DISPATCHED_UPSTREAM_ATTEMPTS":     l.MaxDispatchedUpstreamAttempts,
+	}
+}
+
 func TimeoutLadderStartupLog(l TimeoutLadder) string {
 	return fmt.Sprintf(
 		"timeout ladder: body=%s queue=%s connect=%s tls=%s first_event=%s precommit=%s stream_idle=%s write_idle=%s lifetime=%s drain=%s sse_hb=%s tcp_idle=%s tcp_intvl=%s tcp_count=%d max_attempts=%d",
