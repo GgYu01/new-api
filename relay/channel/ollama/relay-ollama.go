@@ -281,6 +281,8 @@ func ollamaEmbeddingHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *h
 func FetchOllamaModels(baseURL, apiKey string) ([]OllamaModel, error) {
 	url := fmt.Sprintf("%s/api/tags", baseURL)
 
+	// Admin/ops one-shot (controller channel-update). Not customer /v1 relay
+	// traffic; no absolute Timeout so the operator listing is not cut short.
 	client := &http.Client{}
 	request, err := http.NewRequest("GET", url, nil)
 	if err != nil {
@@ -331,6 +333,8 @@ func PullOllamaModel(baseURL, apiKey, modelName string) error {
 		return fmt.Errorf("序列化请求失败: %v", err)
 	}
 
+	// Admin model-pull (controller/channel.go), not /v1 relay. 30m bound is a
+	// pull-job cap for large weights; it cannot fire on a 60m customer request.
 	client := &http.Client{
 		Timeout: 30 * 60 * 1000 * time.Millisecond, // 30分钟超时，支持大模型
 	}
@@ -372,6 +376,8 @@ func PullOllamaModelStream(baseURL, apiKey, modelName string, progressCallback f
 		return fmt.Errorf("序列化请求失败: %v", err)
 	}
 
+	// Admin streaming pull of huge models. 60m is the pull-job cap, not a
+	// customer SSE Client.Timeout.
 	client := &http.Client{
 		Timeout: 60 * 60 * 1000 * time.Millisecond, // 1小时超时，支持超大模型
 	}
@@ -448,6 +454,7 @@ func DeleteOllamaModel(baseURL, apiKey, modelName string) error {
 		return fmt.Errorf("序列化请求失败: %v", err)
 	}
 
+	// Admin DELETE of a local Ollama model. Not customer relay traffic.
 	client := &http.Client{}
 	request, err := http.NewRequest("DELETE", url, strings.NewReader(string(requestBody)))
 	if err != nil {
@@ -481,6 +488,7 @@ func FetchOllamaVersion(baseURL, apiKey string) (string, error) {
 
 	url := fmt.Sprintf("%s/api/version", trimmedBase)
 
+	// Admin version probe (controller/channel.go). 10s one-shot, not relay.
 	client := &http.Client{Timeout: 10 * time.Second}
 	request, err := http.NewRequest("GET", url, nil)
 	if err != nil {

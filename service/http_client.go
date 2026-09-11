@@ -100,6 +100,13 @@ func newRelayHTTPTransport() *http.Transport {
 }
 
 func newRelayHTTPClient(transport http.RoundTripper) *http.Client {
+	// Timeout stays 0 unless RELAY_TIMEOUT is explicitly set. A non-zero
+	// http.Client.Timeout is an absolute wall-clock deadline covering the
+	// whole request (connect + headers + body) and would kill a 60m logical
+	// stream that is still making progress. Relay traffic is bounded by
+	// phase contexts (lifetime / precommit / first-event / idle) plus
+	// Transport Dial/TLS timeouts from common.LoadTimeoutLadder().
+	// RELAY_TIMEOUT is an operational override, default 0.
 	client := &http.Client{
 		Transport:     transport,
 		CheckRedirect: checkRedirect,

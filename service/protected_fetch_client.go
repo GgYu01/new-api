@@ -81,6 +81,10 @@ func newProtectedFetchHTTPClientWithProxy(resolver ssrfResolver, dialContext fun
 		proxy = http.ProxyFromEnvironment
 	}
 
+	// Same RELAY_TIMEOUT override as newRelayHTTPClient: default Timeout==0 so
+	// this client cannot impose an absolute 60m cap. Used for user-URL fetches
+	// (Midjourney image proxy, etc.), not as a substitute for phase contexts
+	// on the provider relay path.
 	client := &http.Client{
 		Transport: &ssrfProtectedRoundTripper{
 			resolver:      resolver,
