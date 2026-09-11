@@ -340,6 +340,23 @@ func (lr *LogicalRequest) BindBody(storage common.BodyStorage) {
 	}
 }
 
+func (lr *LogicalRequest) upstreamBytesLocked() int64 {
+	if lr == nil || lr.bodyStorage == nil {
+		return -1
+	}
+	return lr.bodyStorage.Size()
+}
+
+func (lr *LogicalRequest) downstreamBytesLocked() int64 {
+	if lr == nil || lr.writer == nil {
+		return -1
+	}
+	if n := lr.writer.Size(); n >= 0 {
+		return int64(n)
+	}
+	return 0
+}
+
 func (lr *LogicalRequest) BodyVersion() uint64 {
 	if lr == nil {
 		return 0

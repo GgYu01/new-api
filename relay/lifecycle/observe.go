@@ -25,6 +25,8 @@ type Observation struct {
 	KeepaliveOnly     bool                 `json:"keepalive_only"`
 	SemanticCommitted bool                 `json:"semantic_committed"`
 	TerminalSent      bool                 `json:"terminal_sent"`
+	UpstreamBytes     int64                `json:"upstream_bytes"`
+	DownstreamBytes   int64                `json:"downstream_bytes"`
 	Attempts          []AttemptObservation `json:"attempts"`
 }
 
@@ -42,6 +44,8 @@ func (lr *LogicalRequest) Observe() Observation {
 	out.KeepaliveOnly = lr.keepaliveOnly.Load()
 	out.SemanticCommitted = lr.semanticCommitted.Load()
 	out.TerminalSent = lr.terminalSent.Load()
+	out.UpstreamBytes = lr.upstreamBytesLocked()
+	out.DownstreamBytes = lr.downstreamBytesLocked()
 	if id, _ := lr.attemptID.Load().(string); id != "" {
 		out.AttemptID = id
 	}
