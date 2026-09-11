@@ -285,8 +285,8 @@ func copyInboundBodyToDisk(w io.Writer, r io.Reader) (int64, error) {
 			switch {
 			case errors.Is(readErr, ErrRequestBodyStalled):
 				return written, fmt.Errorf("request body read stalled: %w", readErr)
-			case errors.Is(readErr, ErrRequestBodyTruncated):
-				return written, fmt.Errorf("request body truncated: %w", readErr)
+			case errors.Is(readErr, io.ErrUnexpectedEOF):
+				return written, truncatedBodyError(r, readErr)
 			case errors.Is(readErr, context.Canceled), errors.Is(readErr, context.DeadlineExceeded):
 				return written, fmt.Errorf("request body read canceled: %w", readErr)
 			default:
@@ -487,10 +487,14 @@ type inboundBodyReader struct {
 func (r *inboundBodyReader) Read(p []byte) (int, error) {
 	n, err := r.r.Read(p)
 	r.receivedBytes += int64(n)
-	if err == io.EOF && r.declaredBytes > 0 && r.receivedBytes < r.declaredBytes {
-		return n, fmt.Errorf("%w: declared_bytes=%d received_bytes=%d", ErrRequestBodyTruncated, r.declaredBytes, r.receivedBytes)
-	}
 	return n, err
+}
+
+func truncatedBodyError(reader io.Reader, cause error) error {
+	if in, ok := reader.(*inboundBodyReader); ok && in != nil {
+		return fmt.Errorf("%w: declared_bytes=%d received_bytes=%d: %v", ErrRequestBodyTruncated, in.declaredBytes, in.receivedBytes, cause)
+	}
+	return fmt.Errorf("%w: %v", ErrRequestBodyTruncated, cause)
 }
 
 func wrapInboundBodyReader(reader io.Reader, contentLength int64) io.Reader {
@@ -539,6 +543,9 @@ func CreateBodyStorageFromReader(reader io.Reader, contentLength int64, maxBytes
 	}
 	data, err := io.ReadAll(io.LimitReader(reader, memoryLimit+1))
 	if err != nil {
+		if errors.Is(err, io.ErrUnexpectedEOF) {
+			return nil, truncatedBodyError(reader, err)
+		}
 		return nil, err
 	}
 	if int64(len(data)) > maxBytes {
@@ -569,6 +576,9 @@ func CreateBodyStorageFromReader(reader io.Reader, contentLength int64, maxBytes
 		remainingLimit := maxBytes - int64(len(data))
 		written, err := io.Copy(buffer, io.LimitReader(reader, remainingLimit+1))
 		if err != nil {
+			if errors.Is(err, io.ErrUnexpectedEOF) {
+				return nil, truncatedBodyError(reader, err)
+			}
 			return nil, err
 		}
 		if int64(len(data))+written > maxBytes {

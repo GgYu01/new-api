@@ -541,8 +541,34 @@ func TestCopyInboundBodyToDiskClassifiesFailures(t *testing.T) {
 	})
 }
 
-func TestCreateBodyStorageFromReaderTruncatesShortBody(t *testing.T) {
+type unexpectedEOFReader struct {
+	data []byte
+	pos  int
+}
+
+func (r *unexpectedEOFReader) Read(p []byte) (int, error) {
+	if r.pos >= len(r.data) {
+		return 0, io.ErrUnexpectedEOF
+	}
+	n := copy(p, r.data[r.pos:])
+	r.pos += n
+	return n, nil
+}
+
+func TestCreateBodyStorageFromReaderTrimsPlainEOFShortBody(t *testing.T) {
 	body := strings.NewReader(`{"partial":true`)
+	storage, err := CreateBodyStorageFromReader(body, 64, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = storage.Close() })
+	if IsRequestBodyTruncatedError(err) {
+		t.Fatalf("plain EOF must not classify as truncated: %v", err)
+	}
+}
+
+func TestCreateBodyStorageFromReaderUnexpectedEOFIsTruncated(t *testing.T) {
+	body := &unexpectedEOFReader{data: []byte(`{"partial":true`)}
 	storage, err := CreateBodyStorageFromReader(body, 64, 1024)
 	if storage != nil {
 		_ = storage.Close()
