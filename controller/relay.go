@@ -506,7 +506,12 @@ func shouldRetry(c *gin.Context, info *relaycommon.RelayInfo, openaiErr *types.N
 }
 
 func processChannelError(c *gin.Context, channelError types.ChannelError, err *types.NewAPIError) {
-	logger.LogError(c, fmt.Sprintf("channel error (channel #%d, status code: %d): %s", channelError.ChannelId, err.StatusCode, common.LocalLogPreview(err.Error())))
+	rootID, attemptID, attemptIndex := "", "", -1
+	if lr := lifecycle.FromContext(c); lr != nil {
+		obs := lr.Observe()
+		rootID, attemptID, attemptIndex = obs.RootID, obs.AttemptID, obs.AttemptIndex
+	}
+	logger.LogError(c, fmt.Sprintf("channel error (channel #%d, status code: %d, root=%s attempt=%s idx=%d): %s", channelError.ChannelId, err.StatusCode, rootID, attemptID, attemptIndex, common.LocalLogPreview(err.Error())))
 	// Do not read channel data from the request context in asynchronous work;
 	// the selected channel can otherwise become inconsistent.
 	// do not use context to get channel info, there may be inconsistent channel info when processing asynchronously
