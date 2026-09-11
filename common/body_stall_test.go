@@ -70,6 +70,45 @@ func TestStallGuardRootReturns408OnStalledUpload(t *testing.T) {
 	}
 }
 
+func TestStallGuardRootTrickleProgressNeverStalls(t *testing.T) {
+	t.Setenv("BODY_STALL_WINDOW", "300ms")
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{Handler: StallGuardRoot(stallTestHandler())}
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() { _ = srv.Close() })
+
+	conn, err := net.DialTimeout("tcp", ln.Addr().String(), 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	if _, err := conn.Write([]byte("POST / HTTP/1.1\r\nHost: test\r\nContent-Type: text/plain\r\nContent-Length: 10\r\n\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 10; i++ {
+		time.Sleep(100 * time.Millisecond)
+		if _, err := conn.Write([]byte("x")); err != nil {
+			t.Fatalf("trickle byte %d failed: %v", i, err)
+		}
+	}
+	if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 2048)
+	n, err := conn.Read(buf)
+	if err != nil {
+		t.Fatalf("no response for trickling body: %v", err)
+	}
+	if !strings.Contains(string(buf[:n]), "200") || !strings.Contains(string(buf[:n]), "len=10") {
+		t.Fatalf("expected 200 len=10, got: %q", string(buf[:n]))
+	}
+}
+
 func TestStallGuardRootPassesFullBody(t *testing.T) {
 	t.Setenv("BODY_STALL_WINDOW", "300ms")
 
