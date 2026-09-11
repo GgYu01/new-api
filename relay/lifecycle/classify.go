@@ -205,9 +205,15 @@ const SessionStateInvalidMessage = "会话状态无法验证或已失效，请�
 func PreserveSessionStateError(code, raw string) (keepCode string, message string, stripReplay bool) {
 	c := strings.ToLower(strings.TrimSpace(code))
 	body := strings.ToLower(raw)
-	if strings.Contains(c, "thinking_signature_invalid") || strings.Contains(body, "thinking_signature_invalid") ||
-		strings.Contains(c, "encrypted_content") || strings.Contains(body, "encrypted_content") {
-		return c, SessionStateInvalidMessage, false
+	for _, marker := range []string{"thinking_signature_invalid", "encrypted_content"} {
+		if strings.Contains(c, marker) {
+			return code, SessionStateInvalidMessage, false
+		}
+	}
+	for _, marker := range []string{"thinking_signature_invalid", "encrypted_content"} {
+		if strings.Contains(body, marker) {
+			return marker, SessionStateInvalidMessage, false
+		}
 	}
 	return code, raw, false
 }

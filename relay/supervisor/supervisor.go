@@ -2,16 +2,26 @@ package supervisor
 
 import (
 	"context"
-	"sync/atomic"
+	"strconv"
 	"time"
 
 	"github.com/QuantumNous/new-api/relay/health"
 	"github.com/QuantumNous/new-api/relay/transportpath"
 )
 
+const (
+	MaxAttempts                   = 8
+	MaxCredentials                = 4
+	MaxSamePathCredentialAttempts = 2
+	RecoveryBudget                = 30 * time.Minute
+)
+
 type Attempt struct {
 	Path    transportpath.ID
 	Channel int
+	// CredentialFP is an opaque fingerprint, never a credential secret. Legacy
+	// callers without a fingerprint use the channel as their credential identity.
+	CredentialFP string
 }
 
 type Result struct {
@@ -23,10 +33,7 @@ type Result struct {
 	SucceededPath transportpath.ID
 }
 
-type Runner struct {
-	Health   *health.Table
-	inflight atomic.Int32
-}
+type Runner struct{ Health *health.Table }
 
 func New(table *health.Table) *Runner {
 	if table == nil {
@@ -35,47 +42,52 @@ func New(table *health.Table) *Runner {
 	return &Runner{Health: table}
 }
 
-// Run serial attempts. Callers must not invoke it concurrently for one request.
+// Run owns one logical root and dispatches only serially. Independent roots may
+// share a Runner; their concurrency is not hedging within a request.
 func (r *Runner) Run(ctx context.Context, attempts []Attempt, dispatch func(context.Context, Attempt) error) Result {
+	deadline := time.Now().Add(RecoveryBudget)
+	ctx, cancel := context.WithDeadline(ctx, deadline)
+	defer cancel()
 	out := Result{}
-	if r.inflight.Add(1) != 1 {
-		out.Hedged = true
+	credentials := make(map[string]bool)
+	type pathCredential struct {
+		path       transportpath.ID
+		credential string
 	}
-	defer r.inflight.Add(-1)
-
+	pairs := make(map[pathCredential]int)
 	var lastPath transportpath.ID
 	for _, attempt := range attempts {
-		if ctx.Err() != nil {
+		if ctx.Err() != nil || !time.Now().Before(deadline) || out.Attempts >= MaxAttempts {
 			return out
 		}
-		if lastPath != "" && attempt.Path == lastPath && out.Attempts > 0 {
+		credential := attempt.CredentialFP
+		if credential == "" {
+			credential = "channel:" + strconv.Itoa(attempt.Channel)
+		}
+		pair := pathCredential{attempt.Path, credential}
+		if pairs[pair] >= MaxSamePathCredentialAttempts || !credentials[credential] && len(credentials) >= MaxCredentials {
+			continue
+		}
+		if lastPath != "" && attempt.Path == lastPath {
 			out.SamePathSwap = true
 		}
 		key := health.Key{TransportPathID: string(attempt.Path)}
 		snap := r.Health.Snapshot(key, time.Now())
-		if snap.State == health.StateUnhealthy {
-			_, _ = r.Health.WaitOrProbe(ctx, key, time.Now(), func(context.Context) error {
-				out.Probes++
-				return dispatch(ctx, attempt)
-			})
+		dispatched, err := r.Health.Dispatch(ctx, key, time.Now(), func(ctx context.Context) error {
 			out.Attempts++
 			out.LastPath = attempt.Path
-			if r.Health.Snapshot(key, time.Now()).State == health.StateHealthy {
-				out.SucceededPath = attempt.Path
-				return out
+			if snap.State == health.StateUnhealthy {
+				out.Probes++
 			}
-			lastPath = attempt.Path
-			continue
+			credentials[credential] = true
+			pairs[pair]++
+			return dispatch(ctx, attempt)
+		})
+		if dispatched && err == nil {
+			out.SucceededPath = attempt.Path
+			return out
 		}
-		out.Attempts++
-		out.LastPath = attempt.Path
-		if err := dispatch(ctx, attempt); err != nil {
-			r.Health.MarkUnhealthy(key, time.Now())
-			lastPath = attempt.Path
-			continue
-		}
-		out.SucceededPath = attempt.Path
-		return out
+		lastPath = attempt.Path
 	}
 	return out
 }
