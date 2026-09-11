@@ -180,3 +180,28 @@ func TestStreamStatus_Summary_NilSafe(t *testing.T) {
 	var s *StreamStatus
 	assert.Equal(t, "StreamStatus<nil>", s.Summary())
 }
+
+func TestStreamEndReasonNormalVsAbnormalSplit(t *testing.T) {
+	normal := []StreamEndReason{
+		StreamEndReasonDone,
+		StreamEndReasonEOF,
+		StreamEndReasonHandlerStop,
+	}
+	for _, reason := range normal {
+		s := NewStreamStatus()
+		s.SetEndReason(reason, nil)
+		assert.True(t, s.IsNormalEnd(), "reason %q must count as normal", reason)
+	}
+	abnormal := []StreamEndReason{
+		StreamEndReasonTimeout,
+		StreamEndReasonClientGone,
+		StreamEndReasonScannerErr,
+		StreamEndReasonPanic,
+		StreamEndReasonPingFail,
+	}
+	for _, reason := range abnormal {
+		s := NewStreamStatus()
+		s.SetEndReason(reason, nil)
+		assert.False(t, s.IsNormalEnd(), "reason %q must not merge into normal EOF", reason)
+	}
+}
