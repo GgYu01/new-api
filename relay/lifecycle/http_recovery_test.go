@@ -230,3 +230,54 @@ func shouldKeepRetry(t *testing.T, lr *lifecycle.LogicalRequest, apiErr *types.N
 
 var _ channel.Adaptor = (*openai.Adaptor)(nil)
 var _ channel.Adaptor = (*sub2api.Adaptor)(nil)
+
+func Test_OpenAIAdaptor_delayed503ThenAlternatePathSuccess(t *testing.T) {
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(1500 * time.Millisecond)
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"error":{"message":"slow overload"}}`))
+	}))
+	defer slow.Close()
+	var fastHits atomic.Int32
+	fast := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fastHits.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl-alt\",\"choices\":[{\"delta\":{\"content\":\"alt-hi\"}}]}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer fast.Close()
+
+	adaptor := &openai.Adaptor{}
+	c, rec, lr := newRelayContext(t, "/v1/chat/completions", true, types.RelayFormatOpenAI)
+	start := time.Now()
+
+	slowInfo := newInfo(slow.URL, "/v1/chat/completions", true)
+	adaptor.Init(slowInfo)
+	_, _, err := lr.BeginAttempt()
+	require.NoError(t, err)
+	resp, err := adaptor.DoRequest(c, slowInfo, strings.NewReader(`{"model":"gpt-4","stream":true}`))
+	require.NoError(t, err)
+	httpResp := resp.(*http.Response)
+	require.Equal(t, http.StatusServiceUnavailable, httpResp.StatusCode)
+	apiErr := lifecycle.HandleNon2xx(c, httpResp, false)
+	require.False(t, lr.SemanticCommitted())
+	require.True(t, shouldKeepRetry(t, lr, apiErr))
+	require.GreaterOrEqual(t, time.Since(start), 1500*time.Millisecond)
+	lr.EndAttempt(lifecycle.AttemptRecord{StatusCode: 503, TransportPath: "slow-primary"})
+
+	fastInfo := newInfo(fast.URL, "/v1/chat/completions", true)
+	adaptor.Init(fastInfo)
+	_, _, err = lr.BeginAttempt()
+	require.NoError(t, err)
+	resp, err = adaptor.DoRequest(c, fastInfo, strings.NewReader(`{"model":"gpt-4","stream":true}`))
+	require.NoError(t, err)
+	httpResp = resp.(*http.Response)
+	require.Equal(t, http.StatusOK, httpResp.StatusCode)
+	usage, doErr := adaptor.DoResponse(c, httpResp, fastInfo)
+	require.Nil(t, doErr)
+	require.NotNil(t, usage)
+	require.True(t, lr.SemanticCommitted())
+	require.Contains(t, rec.Body.String(), "alt-hi")
+	require.Equal(t, int32(1), fastHits.Load())
+	require.Equal(t, 2, lr.DispatchedAttempts())
+}
