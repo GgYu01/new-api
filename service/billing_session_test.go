@@ -113,3 +113,19 @@ func TestBillingSessionSettle_ZeroDeltaTransitionsFunding(t *testing.T) {
 	assert.True(t, session.fundingSettled)
 	assert.True(t, session.settled)
 }
+
+func TestBillingSessionSettleAndRefundAreOnceAcrossAttempts(t *testing.T) {
+	funding := &mockFundingSource{source: BillingSourceWallet}
+	info := &relaycommon.RelayInfo{UserId: 1, TokenId: 1, TokenKey: "k", IsPlayground: true}
+	session := &BillingSession{relayInfo: info, funding: funding, preConsumedQuota: 100}
+
+	require.NoError(t, session.Settle(80))
+	require.NoError(t, session.Settle(80))
+	session.Refund(nil)
+	session.Refund(nil)
+
+	assert.Equal(t, 1, funding.settleCalled)
+	assert.Equal(t, 0, funding.refundCalled)
+	assert.True(t, session.settled)
+	assert.False(t, session.refunded)
+}
