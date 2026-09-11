@@ -199,3 +199,15 @@ func ShouldHoldUpstreamEvent(data string) bool {
 	}
 	return false
 }
+
+const SessionStateInvalidMessage = "会话状态无法验证或已失效，请新建会话后重试"
+
+func PreserveSessionStateError(code, raw string) (keepCode string, message string, stripReplay bool) {
+	c := strings.ToLower(strings.TrimSpace(code))
+	body := strings.ToLower(raw)
+	if strings.Contains(c, "thinking_signature_invalid") || strings.Contains(body, "thinking_signature_invalid") ||
+		strings.Contains(c, "encrypted_content") || strings.Contains(body, "encrypted_content") {
+		return c, SessionStateInvalidMessage, false
+	}
+	return code, raw, false
+}
