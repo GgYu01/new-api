@@ -3,6 +3,8 @@ package common
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -589,3 +591,141 @@ func TestCreateBodyStorageFromReaderUnknownLengthEOFIsNotTruncated(t *testing.T)
 	}
 	t.Cleanup(func() { _ = storage.Close() })
 }
+
+type countingSource struct {
+	data []byte
+	pos  int
+	n    int
+}
+
+func (r *countingSource) Read(p []byte) (int, error) {
+	r.n++
+	if r.pos >= len(r.data) {
+		return 0, io.EOF
+	}
+	n := copy(p, r.data[r.pos:])
+	r.pos += n
+	return n, nil
+}
+
+func sha256Hex(t *testing.T, data []byte) string {
+	t.Helper()
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
+func replaySHA(t *testing.T, storage BodyStorage) (string, []byte) {
+	t.Helper()
+	r, err := storage.NewReader()
+	require.NoError(t, err)
+	defer r.Close()
+	got, err := io.ReadAll(r)
+	require.NoError(t, err)
+	sum := sha256.Sum256(got)
+	return hex.EncodeToString(sum[:]), got
+}
+
+func TestBodyStorageMaterializesOnceAndReplaysIdenticalSHA256(t *testing.T) {
+	const attempts = 3
+
+	t.Run("memory_small", func(t *testing.T) {
+		payload := []byte(`{"model":"gpt-4","input":"hello-body-spool"}`)
+		want := sha256Hex(t, payload)
+		src := &countingSource{data: payload}
+		before := BodyStorageCreateCount()
+
+		storage, err := CreateBodyStorageFromReader(src, int64(len(payload)), 1024)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = storage.Close() })
+
+		require.False(t, storage.IsDisk())
+		require.True(t, storage.Complete())
+		require.Equal(t, want, storage.SHA256Hex())
+		require.Equal(t, before+1, BodyStorageCreateCount(), "body must materialize exactly once")
+		require.Greater(t, src.n, 0)
+		customerReads := src.n
+
+		var hashes []string
+		for i := 0; i < attempts; i++ {
+			gotHash, gotBytes := replaySHA(t, storage)
+			require.Equal(t, want, gotHash, "attempt %d SHA-256", i+1)
+			require.Equal(t, payload, gotBytes, "attempt %d semantic bytes", i+1)
+			hashes = append(hashes, gotHash)
+		}
+		require.Equal(t, hashes[0], hashes[1])
+		require.Equal(t, hashes[0], hashes[2])
+		require.Equal(t, customerReads, src.n, "customer body must not be re-read on replay")
+		require.Equal(t, before+1, BodyStorageCreateCount())
+		require.NoError(t, RequireCompleteBody(storage))
+	})
+
+	t.Run("disk_large", func(t *testing.T) {
+		configureBodyStorageDiskCache(t, 1, 64)
+		payload := bytes.Repeat([]byte("native-spool-payload\n"), 128*1024) // ~2.5 MiB sequential disk
+		want := sha256Hex(t, payload)
+		src := &countingSource{data: payload}
+		before := BodyStorageCreateCount()
+
+		storage, err := CreateBodyStorageFromReader(src, int64(len(payload)), 8<<20)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = storage.Close() })
+
+		require.True(t, storage.IsDisk())
+		require.True(t, storage.Complete())
+		require.Equal(t, want, storage.SHA256Hex())
+		require.Equal(t, before+1, BodyStorageCreateCount(), "large body must spool to disk exactly once")
+		customerReads := src.n
+
+		var hashes []string
+		for i := 0; i < attempts; i++ {
+			gotHash, gotBytes := replaySHA(t, storage)
+			require.Equal(t, want, gotHash, "attempt %d SHA-256", i+1)
+			require.Equal(t, payload, gotBytes)
+			hashes = append(hashes, gotHash)
+		}
+		require.Equal(t, hashes[0], hashes[1])
+		require.Equal(t, hashes[0], hashes[2])
+		require.Equal(t, customerReads, src.n, "customer body must not be re-read on replay")
+		require.Equal(t, before+1, BodyStorageCreateCount())
+	})
+}
+
+type incompleteStub struct {
+	complete bool
+}
+
+func (s *incompleteStub) Read([]byte) (int, error)            { return 0, io.EOF }
+func (s *incompleteStub) Seek(int64, int) (int64, error)      { return 0, nil }
+func (s *incompleteStub) Close() error                        { return nil }
+func (s *incompleteStub) Bytes() ([]byte, error)              { return nil, nil }
+func (s *incompleteStub) Size() int64                         { return 0 }
+func (s *incompleteStub) IsDisk() bool                        { return false }
+func (s *incompleteStub) NewReader() (io.ReadCloser, error)   { return io.NopCloser(bytes.NewReader(nil)), nil }
+func (s *incompleteStub) SHA256Hex() string                   { return "" }
+func (s *incompleteStub) Complete() bool                      { return s.complete }
+
+func TestRequireCompleteBodyGatesDispatch(t *testing.T) {
+	err := RequireCompleteBody(nil)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "nil")
+
+	var dispatched int
+	dispatch := func(storage BodyStorage) error {
+		if err := RequireCompleteBody(storage); err != nil {
+			return err
+		}
+		dispatched++
+		return nil
+	}
+
+	require.ErrorIs(t, dispatch(&incompleteStub{complete: false}), ErrBodyIncomplete)
+	require.Zero(t, dispatched, "dispatcher must not observe CPA/C2A before body complete")
+
+	storage, err := CreateBodyStorage([]byte(`{"ok":true}`))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = storage.Close() })
+	require.NoError(t, dispatch(storage))
+	require.Equal(t, 1, dispatched)
+	require.True(t, storage.Complete())
+}
+

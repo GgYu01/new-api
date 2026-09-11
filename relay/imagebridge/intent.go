@@ -78,6 +78,20 @@ func DetectJSON(path string, body []byte) (Intent, bool, error) {
 	return DetectJSONReader(path, bytes.NewReader(body))
 }
 
+// DetectJSONStorage pre-scans image intent from request-owned BodyStorage using
+// a single sequential NewReader. Callers must not Bytes()-copy the payload.
+func DetectJSONStorage(path string, storage common.BodyStorage) (Intent, bool, error) {
+	if storage == nil {
+		return Intent{}, false, fmt.Errorf("body storage is nil")
+	}
+	reader, err := storage.NewReader()
+	if err != nil {
+		return Intent{}, false, err
+	}
+	defer func() { _ = reader.Close() }()
+	return DetectJSONReader(path, reader)
+}
+
 func detect(path string, payload map[string]any) (Intent, bool, error) {
 	normalizedPath := strings.TrimSuffix(strings.SplitN(path, "?", 2)[0], "/")
 	clientModel := stringValue(payload["model"])

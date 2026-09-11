@@ -96,18 +96,16 @@ func (w *Writer) Write(data []byte) (int, error) {
 }
 
 func (w *Writer) writeLocked(data []byte) (int, error) {
-	if !w.headerSent {
-		w.writeHeaderLocked(w.status)
+	if w.lr != nil {
+		handled, n, err := w.lr.interceptCompletionSafe(w, data)
+		if handled {
+			return n, err
+		}
+		if err != nil {
+			return n, err
+		}
 	}
-	n, err := w.ResponseWriter.Write(data)
-	if w.size < 0 {
-		w.size = 0
-	}
-	w.size += n
-	if w.lr != nil && n > 0 {
-		classifyWrite(w.lr, data[:n])
-	}
-	return n, err
+	return w.emitLocked(data)
 }
 
 func (w *Writer) WriteString(s string) (int, error) {

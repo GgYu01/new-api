@@ -3,8 +3,11 @@ package common
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"os"
 	"sync"
@@ -29,6 +32,12 @@ type BodyStorage interface {
 	// returned reader releases only that reader, never the storage itself;
 	// after the storage has been closed, NewReader returns ErrStorageClosed.
 	NewReader() (io.ReadCloser, error)
+	// SHA256Hex is the hex-encoded SHA-256 of the fully received body.
+	SHA256Hex() string
+	// Complete reports that the inbound customer body finished (EOF) and the
+	// storage is ready for dispatcher / CPA / C2A use. Incomplete storage must
+	// never be dispatched.
+	Complete() bool
 }
 
 // ReplayableBody is an outbound request body that can report its byte size and
@@ -42,11 +51,45 @@ type ReplayableBody interface {
 // ErrStorageClosed reports access after storage has been closed.
 var ErrStorageClosed = fmt.Errorf("body storage is closed")
 
+// ErrBodyIncomplete reports an attempt to dispatch an inbound body that has
+// not finished spooling. Dispatchers (CPA/C2A) must observe Complete() first.
+var ErrBodyIncomplete = fmt.Errorf("request body is not complete")
+
+var bodyStorageCreateCount atomic.Int64
+
+// BodyStorageCreateCount is the number of successful BodyStorage materializations
+// in this process. Tests use it to prove a body is spooled exactly once.
+func BodyStorageCreateCount() int64 {
+	return bodyStorageCreateCount.Load()
+}
+
+func noteBodyStorageCreated() {
+	bodyStorageCreateCount.Add(1)
+}
+
+func hashBody(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
+// RequireCompleteBody is the dispatcher gate: CPA/C2A must not be called until
+// the inbound body has fully arrived. Incomplete storage returns ErrBodyIncomplete.
+func RequireCompleteBody(storage BodyStorage) error {
+	if storage == nil {
+		return fmt.Errorf("body storage is nil")
+	}
+	if !storage.Complete() {
+		return ErrBodyIncomplete
+	}
+	return nil
+}
+
 // memoryStorage keeps a replayable request body in memory.
 type memoryStorage struct {
 	data   []byte
 	reader *bytes.Reader
 	size   int64
+	sum    string
 	closed int32
 	mu     sync.Mutex
 }
@@ -54,10 +97,12 @@ type memoryStorage struct {
 func newMemoryStorage(data []byte) *memoryStorage {
 	size := int64(len(data))
 	IncrementMemoryBuffers(size)
+	noteBodyStorageCreated()
 	return &memoryStorage{
 		data:   data,
 		reader: bytes.NewReader(data),
 		size:   size,
+		sum:    hashBody(data),
 	}
 }
 
@@ -117,11 +162,20 @@ func (m *memoryStorage) IsDisk() bool {
 	return false
 }
 
+func (m *memoryStorage) SHA256Hex() string {
+	return m.sum
+}
+
+func (m *memoryStorage) Complete() bool {
+	return atomic.LoadInt32(&m.closed) == 0 && m.sum != ""
+}
+
 // diskStorage keeps a replayable request body in an owned temporary file.
 type diskStorage struct {
 	file        *os.File
 	filePath    string
 	size        int64
+	sum         string
 	reservation *diskCacheReservation
 	closed      int32
 	mu          sync.Mutex
@@ -175,6 +229,7 @@ type reservingDiskWriter struct {
 	file        *os.File
 	reservation *diskCacheReservation
 	written     int64
+	hash        hash.Hash
 }
 
 func (w *reservingDiskWriter) Write(p []byte) (int, error) {
@@ -187,10 +242,20 @@ func (w *reservingDiskWriter) Write(p []byte) (int, error) {
 	}
 	n, err := w.file.Write(p)
 	w.written += int64(n)
+	if n > 0 && w.hash != nil {
+		_, _ = w.hash.Write(p[:n])
+	}
 	if err == nil && n != len(p) {
 		err = io.ErrShortWrite
 	}
 	return n, err
+}
+
+func (w *reservingDiskWriter) SHA256Hex() string {
+	if w.hash == nil {
+		return ""
+	}
+	return hex.EncodeToString(w.hash.Sum(nil))
 }
 
 func newDiskStorage(data []byte, cachePath string) (*diskStorage, error) {
@@ -231,11 +296,13 @@ func newDiskStorage(data []byte, cachePath string) (*diskStorage, error) {
 
 	size := int64(n)
 	incrementDiskFileCount()
+	noteBodyStorageCreated()
 
 	return &diskStorage{
 		file:        file,
 		filePath:    filePath,
 		size:        size,
+		sum:         hashBody(data),
 		reservation: reservation,
 	}, nil
 }
@@ -321,7 +388,7 @@ func newDiskStorageFromPrefixAndReader(prefix []byte, reader io.Reader, maxBytes
 		reservation.release()
 	}
 
-	writer := &reservingDiskWriter{file: file, reservation: reservation}
+	writer := &reservingDiskWriter{file: file, reservation: reservation, hash: sha256.New()}
 	prefixWritten, err := writer.Write(prefix)
 	if err != nil {
 		removePartial()
@@ -351,10 +418,12 @@ func newDiskStorageFromPrefixAndReader(prefix []byte, reader io.Reader, maxBytes
 
 	reservation.trimTo(written)
 	incrementDiskFileCount()
+	noteBodyStorageCreated()
 	return &diskStorage{
 		file:        file,
 		filePath:    filePath,
 		size:        written,
+		sum:         writer.SHA256Hex(),
 		reservation: reservation,
 	}, nil
 }
@@ -456,6 +525,14 @@ func (d *diskStorage) Size() int64 {
 
 func (d *diskStorage) IsDisk() bool {
 	return true
+}
+
+func (d *diskStorage) SHA256Hex() string {
+	return d.sum
+}
+
+func (d *diskStorage) Complete() bool {
+	return atomic.LoadInt32(&d.closed) == 0 && d.sum != ""
 }
 
 // CreateBodyStorage selects memory or disk storage for a complete body.

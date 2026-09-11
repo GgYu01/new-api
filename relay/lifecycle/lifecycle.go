@@ -79,8 +79,9 @@ type LogicalRequest struct {
 	bodyStorage common.BodyStorage
 	bodyVersion uint64
 
-	attempts []AttemptRecord
-	hold     *HoldBuffer
+	attempts       []AttemptRecord
+	hold           *HoldBuffer
+	completionSafe *CompletionSafeMode
 
 	precommitDeadline time.Time
 	absoluteDeadline  time.Time
@@ -120,6 +121,7 @@ func New(root context.Context, rootID string, stream bool, format types.RelayFor
 		absoluteDeadline:  now.Add(cfg.LogicalRequestMaxLifetime),
 	}
 	lr.attemptID.Store("")
+	initCompletionSafe(lr, format)
 	return lr
 }
 
@@ -482,6 +484,10 @@ func (lr *LogicalRequest) EndAttempt(rec AttemptRecord) {
 	if rec.UpstreamMayExecute {
 		lr.upstreamMayExecute.Store(true)
 	}
+	cs := lr.completionSafe
+	if cs != nil && !cs.HasCompleted() && !cs.Flushed() {
+		cs.Reset()
+	}
 }
 
 func (lr *LogicalRequest) CancelRoot(cause CancelCause) {
@@ -507,7 +513,11 @@ func (lr *LogicalRequest) Cleanup() {
 		lr.attemptCancel()
 		lr.attemptCancel = nil
 	}
+	cs := lr.completionSafe
 	lr.mu.Unlock()
+	if cs != nil {
+		cs.Close()
+	}
 	if lr.rootCancel != nil {
 		lr.rootCancel()
 	}
