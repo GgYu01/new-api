@@ -1630,13 +1630,14 @@ func SettleSubscriptionPreConsume(requestId string, delta int64) error {
 }
 
 // SettleSubscriptionPreConsumeWithToken atomically commits the subscription delta,
-// persists any pending token settlement information, and advances the pre-consume record to "settled"
+// settles the token quota within the same transaction, and advances the pre-consume record to "settled"
 // in a single database transaction under lockForUpdate.
 func SettleSubscriptionPreConsumeWithToken(requestId string, delta int64, tokenId int, tokenKey string, tokenDelta int64) error {
 	if strings.TrimSpace(requestId) == "" {
 		return errors.New("requestId is empty")
 	}
-	return DB.Transaction(func(tx *gorm.DB) error {
+	applied := false
+	err := DB.Transaction(func(tx *gorm.DB) error {
 		var record SubscriptionPreConsumeRecord
 		if err := lockForUpdate(tx).Where("request_id = ?", requestId).First(&record).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -1666,13 +1667,53 @@ func SettleSubscriptionPreConsumeWithToken(requestId string, delta int64, tokenI
 		}
 		record.Status = "settled"
 		if tokenId > 0 && tokenDelta != 0 {
+			var tokenUpdates map[string]interface{}
+			if tokenDelta > 0 {
+				tokenUpdates = map[string]interface{}{
+					"remain_quota":  gorm.Expr("remain_quota - ?", tokenDelta),
+					"used_quota":    gorm.Expr("used_quota + ?", tokenDelta),
+					"accessed_time": common.GetTimestamp(),
+				}
+			} else {
+				tokenUpdates = map[string]interface{}{
+					"remain_quota":  gorm.Expr("remain_quota + ?", -tokenDelta),
+					"used_quota":    gorm.Expr("used_quota - ?", -tokenDelta),
+					"accessed_time": common.GetTimestamp(),
+				}
+			}
+			upRes := tx.Model(&Token{}).Where("id = ?", tokenId).Updates(tokenUpdates)
+			if upRes.Error != nil {
+				return upRes.Error
+			}
+			if upRes.RowsAffected == 0 {
+				return fmt.Errorf("token %d not found or deleted during subscription settle", tokenId)
+			}
 			record.TokenId = tokenId
 			record.TokenKey = tokenKey
 			record.TokenDelta = tokenDelta
-			record.TokenSettled = false
+			record.TokenSettled = true
+		} else if tokenId > 0 {
+			record.TokenId = tokenId
+			record.TokenKey = tokenKey
+			record.TokenDelta = 0
+			record.TokenSettled = true
 		}
-		return tx.Save(&record).Error
+		if err := tx.Save(&record).Error; err != nil {
+			return err
+		}
+		applied = true
+		return nil
 	})
+	if err == nil && applied && common.RedisEnabled && tokenKey != "" && tokenDelta != 0 {
+		gopool.Go(func() {
+			if tokenDelta > 0 {
+				_ = cacheDecrTokenQuota(tokenKey, tokenDelta)
+			} else {
+				_ = cacheIncrTokenQuota(tokenKey, -tokenDelta)
+			}
+		})
+	}
+	return err
 }
 
 // MarkSubscriptionPreConsumeSettled transitions a consumed pre-consume record

@@ -280,12 +280,24 @@ func TestSettleSubscriptionPreConsumeWithTokenAndTerminalRollback(t *testing.T) 
 	require.Equal(t, token.Id, settledRecord.TokenId)
 	require.Equal(t, token.Key, settledRecord.TokenKey)
 	require.Equal(t, int64(20), settledRecord.TokenDelta)
-	require.False(t, settledRecord.TokenSettled)
+	require.True(t, settledRecord.TokenSettled)
+
+	var updatedToken Token
+	require.NoError(t, DB.Where("id = ?", token.Id).First(&updatedToken).Error)
+	require.Equal(t, 1980, updatedToken.RemainQuota)
 
 	// Rolling back an already settled record must be a no-op
 	err = RollbackExtraSubscriptionQuota(531, "req-settle-tok", 50)
 	require.NoError(t, err)
 	require.Equal(t, int64(50), getTerminalRecord(t, "req-settle-tok").ExtraReserved)
+
+	// Idempotency: duplicate settle must be a no-op and NOT mutate token quota or record again
+	err = SettleSubscriptionPreConsumeWithToken("req-settle-tok", 20, token.Id, token.Key, 20)
+	require.NoError(t, err)
+	var recheckedToken Token
+	require.NoError(t, DB.Where("id = ?", token.Id).First(&recheckedToken).Error)
+	require.Equal(t, 1980, recheckedToken.RemainQuota, "duplicate settle must not decrement token quota twice")
 }
+
 
 

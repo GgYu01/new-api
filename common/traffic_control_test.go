@@ -59,7 +59,7 @@ func TestTrafficControlOptionsRejectQueueAndParseDefaults(t *testing.T) {
 	cfg, err := TrafficControlConfigFromOptions(map[string]string{TrafficControlGlobalRPMOption: "240"})
 	require.NoError(t, err)
 	require.Equal(t, int64(240), cfg.GlobalRPM)
-	require.Equal(t, int64(32), cfg.Burst)
+	require.Equal(t, int64(128), cfg.Burst)
 	_, err = TrafficControlConfigFromOptions(map[string]string{TrafficControlWaitingQueueOption: "1"})
 	require.Error(t, err)
 }
@@ -90,7 +90,7 @@ func TestDefaultTrafficControlIsConcurrency240Queue0(t *testing.T) {
 	cfg := DefaultTrafficControlConfig()
 	require.True(t, cfg.Enabled)
 	require.Equal(t, TrafficControlModeConcurrency, cfg.Mode)
-	require.Equal(t, int64(240), cfg.MaxActiveRequests)
+	require.Equal(t, int64(1000), cfg.MaxActiveRequests)
 	require.Zero(t, cfg.WaitingQueue)
 	require.Zero(t, cfg.WaitingTimeoutMs)
 	require.NoError(t, ValidateTrafficControlConfig(cfg))

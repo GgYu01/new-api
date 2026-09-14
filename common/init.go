@@ -32,8 +32,14 @@ func printHelp() {
 func InitEnv() {
 	flag.Parse()
 
+	// 捕获编译期版本，防止环境变量覆盖导致丢失原始编译信息
+	if CompiledVersion == "" && Version != "" && Version != "v0.0.0" {
+		CompiledVersion = Version
+	}
+
 	envVersion := os.Getenv("VERSION")
 	if envVersion != "" {
+		RuntimeVersionOverride = envVersion
 		Version = envVersion
 	}
 
@@ -108,7 +114,7 @@ func InitEnv() {
 	// Initialize variables with GetEnvOrDefault
 	SyncFrequency = GetEnvOrDefault("SYNC_FREQUENCY", 60)
 	BatchUpdateInterval = GetEnvOrDefault("BATCH_UPDATE_INTERVAL", 5)
-	RelayTimeout = GetEnvOrDefault("RELAY_TIMEOUT", 0)
+	RelayTimeout = GetEnvOrDefault("RELAY_TIMEOUT", 0) // operational override; default 0 disables http.Client.Timeout
 	RelayIdleConnTimeout = GetEnvOrDefault("RELAY_IDLE_CONN_TIMEOUT", 90)
 	RelayMaxIdleConns = GetEnvOrDefault("RELAY_MAX_IDLE_CONNS", 500)
 	RelayMaxIdleConnsPerHost = GetEnvOrDefault("RELAY_MAX_IDLE_CONNS_PER_HOST", 100)

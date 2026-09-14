@@ -13,9 +13,9 @@ type PerformanceMonitorConfig struct {
 var performanceMonitorConfig atomic.Value
 
 func init() {
-	// 初始化默认配置
+	// 初始化默认配置：生产默认关闭宿主机 CPU 熔断与独立采样循环
 	performanceMonitorConfig.Store(PerformanceMonitorConfig{
-		Enabled:         true,
+		Enabled:         false,
 		CPUThreshold:    90,
 		MemoryThreshold: 90,
 		DiskThreshold:   90,

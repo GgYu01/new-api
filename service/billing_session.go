@@ -69,12 +69,14 @@ func (s *BillingSession) Settle(actualQuota int) error {
 			if err := model.SettleSubscriptionPreConsumeWithToken(sub.requestId, int64(delta), tokenId, tokenKey, tokenDelta); err != nil {
 				return err
 			}
+			s.fundingSettled = true
+			s.tokenSettled = true
 		} else {
 			if err := s.funding.Settle(delta); err != nil {
 				return err
 			}
+			s.fundingSettled = true
 		}
-		s.fundingSettled = true
 	}
 	// 2) 调整令牌额度（仅在尚未成功时执行）
 	var tokenErr error

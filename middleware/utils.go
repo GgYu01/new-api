@@ -15,6 +15,9 @@ func abortWithOpenAiMessage(c *gin.Context, statusCode int, message string, code
 		codeStr = string(code[0])
 	}
 	userId := c.GetInt("id")
+	if c.Writer.Header().Get("X-NewAPI-Early-Exit-Stage") == "" {
+		c.Header("X-NewAPI-Early-Exit-Stage", "distributor_guard")
+	}
 	c.JSON(statusCode, gin.H{
 		"error": gin.H{
 			"message": common.MessageWithRequestId(message, c.GetString(common.RequestIdKey)),
@@ -27,6 +30,9 @@ func abortWithOpenAiMessage(c *gin.Context, statusCode int, message string, code
 }
 
 func abortWithMidjourneyMessage(c *gin.Context, statusCode int, code int, description string) {
+	if c.Writer.Header().Get("X-NewAPI-Early-Exit-Stage") == "" {
+		c.Header("X-NewAPI-Early-Exit-Stage", "midjourney_guard")
+	}
 	c.JSON(statusCode, gin.H{
 		"description": description,
 		"type":        "new_api_error",

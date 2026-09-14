@@ -41,6 +41,9 @@ func init() {
 		channelName := adaptor.GetChannelName()
 		modelNames := adaptor.GetModelList()
 		for _, modelName := range modelNames {
+			if service.IsDelistedModel(modelName) {
+				continue
+			}
 			openAIModels = append(openAIModels, dto.OpenAIModels{
 				Id:      modelName,
 				Object:  "model",
@@ -254,6 +257,9 @@ func ListModels(c *gin.Context, modelType int) {
 	}
 	models := service.GetGroupsEnabledModels(ownerGroups)
 	for _, modelName := range models {
+		if service.IsDelistedModel(modelName) {
+			continue
+		}
 		if modelLimitEnable {
 			matchingName := ratio_setting.FormatMatchingModelName(modelName)
 			if !tokenModelLimit[modelName] && !tokenModelLimit[matchingName] {

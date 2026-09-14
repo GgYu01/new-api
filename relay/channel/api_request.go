@@ -339,8 +339,6 @@ func applyTracingHeaders(headers *http.Header, c *gin.Context, info *common.Rela
 	}
 	if externalReqID != "" {
 		headers.Set("X-Client-Request-Id", externalReqID)
-	} else if serverExecID != "" {
-		headers.Set("X-Client-Request-Id", serverExecID)
 	}
 
 	tp := c.GetString(common2.ContextKeyTraceparent)
@@ -463,9 +461,10 @@ func DoWssRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBody
 }
 
 func newDownstreamRequestEndedError(message string, contextErr error) *types.NewAPIError {
-	return types.NewError(
+	return types.NewErrorWithStatusCode(
 		fmt.Errorf("%s: %w", message, contextErr),
-		types.ErrorCodeDoRequestFailed,
+		types.ErrorCodeDownstreamCanceled,
+		499,
 		types.ErrOptionWithSkipRetry(),
 		types.ErrOptionWithNoRecordErrorLog(),
 	)

@@ -217,13 +217,16 @@ func migrateTrafficControlDefaults() {
 	if marker == common.TrafficControlDefaultsMigratedValue {
 		return
 	}
-	legacyDefaults := mode == string(common.TrafficControlModeHybrid) && rpm == "240" && burst == "32" && maxActive == "240"
+	legacyDefaults := (mode == string(common.TrafficControlModeHybrid) || mode == string(common.TrafficControlModeRPM) || maxActive == "240" || rpm == "240" || burst == "32" || maxActive == "120" || rpm == "120")
 	if legacyDefaults {
-		common.SysLog("traffic control migration: legacy hybrid/240RPM/32Burst defaults detected, switching to concurrency/240 (waiting_queue=0)")
+		common.SysLog("traffic control migration: legacy/stale defaults detected, switching to concurrency/1000 (waiting_queue=0)")
 		if err := UpdateOption(common.TrafficControlModeOption, string(common.TrafficControlModeConcurrency)); err != nil {
 			common.SysLog("traffic control migration: failed to persist concurrency mode: " + err.Error())
 			return
 		}
+		_ = UpdateOption(common.TrafficControlMaxActiveOption, "1000")
+		_ = UpdateOption(common.TrafficControlGlobalRPMOption, "1000")
+		_ = UpdateOption(common.TrafficControlBurstOption, "128")
 	}
 	if err := UpdateOption(common.TrafficControlDefaultsMigratedOption, common.TrafficControlDefaultsMigratedValue); err != nil {
 		common.SysLog("traffic control migration: failed to persist migration marker: " + err.Error())

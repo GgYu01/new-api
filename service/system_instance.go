@@ -52,14 +52,33 @@ type SystemInstanceResources struct {
 }
 
 type SystemInstanceResourceUsage struct {
-	UsagePercent float64 `json:"usage_percent"`
+	Status        string   `json:"status,omitempty"`
+	Scope         string   `json:"scope,omitempty"`
+	Source        string   `json:"source,omitempty"`
+	UsagePercent  *float64 `json:"usage_percent"`
+	UsedValue     *uint64  `json:"used_value,omitempty"`
+	TotalCapacity *uint64  `json:"total_capacity,omitempty"`
+	UsedCores     *float64 `json:"used_cores,omitempty"`
+	TotalCores    *float64 `json:"total_cores,omitempty"`
+	ProcessRSS    *uint64  `json:"process_rss,omitempty"`
+	GoHeapAlloc   *uint64  `json:"go_heap_alloc,omitempty"`
+	Unit          string   `json:"unit,omitempty"`
+	SampledAt     int64    `json:"sampled_at,omitempty"`
+	IntervalMs    int64    `json:"interval_ms,omitempty"`
+	LastError     string   `json:"last_error,omitempty"`
 }
 
 type SystemInstanceStorageMetrics struct {
-	TotalBytes  uint64  `json:"total_bytes"`
-	UsedBytes   uint64  `json:"used_bytes"`
-	FreeBytes   uint64  `json:"free_bytes"`
-	UsedPercent float64 `json:"used_percent"`
+	Status      string   `json:"status,omitempty"`
+	Scope       string   `json:"scope,omitempty"`
+	Source      string   `json:"source,omitempty"`
+	MountPoint  string   `json:"mount_point,omitempty"`
+	TotalBytes  uint64   `json:"total_bytes"`
+	UsedBytes   uint64   `json:"used_bytes"`
+	FreeBytes   uint64   `json:"free_bytes"`
+	UsedPercent *float64 `json:"used_percent"`
+	SampledAt   int64    `json:"sampled_at,omitempty"`
+	LastError   string   `json:"last_error,omitempty"`
 }
 
 func StartSystemInstanceReporter() {
@@ -88,8 +107,13 @@ func ReportCurrentSystemInstance() error {
 		identity.ManuallyConfigured = false
 		identity.ShouldConfigureManually = true
 	}
+
 	systemStatus := common.GetSystemStatus()
+	cpuMetric := systemStatus.CPU
+	memMetric := systemStatus.Memory
+	storageMetric := systemStatus.Storage
 	diskInfo := common.GetDiskSpaceInfo()
+
 	info := SystemInstanceInfo{
 		SchemaVersion: 1,
 		Node:          identity,
@@ -107,16 +131,46 @@ func ReportCurrentSystemInstance() error {
 		},
 		Resources: SystemInstanceResources{
 			CPU: SystemInstanceResourceUsage{
-				UsagePercent: systemStatus.CPUUsage,
+				Status:        cpuMetric.Status,
+				Scope:         cpuMetric.Scope,
+				Source:        cpuMetric.Source,
+				UsagePercent:  cpuMetric.UsagePercent,
+				UsedValue:     cpuMetric.UsedValue,
+				TotalCapacity: cpuMetric.TotalCapacity,
+				UsedCores:     cpuMetric.UsedCores,
+				TotalCores:    cpuMetric.TotalCores,
+				ProcessRSS:    cpuMetric.ProcessRSS,
+				GoHeapAlloc:   cpuMetric.GoHeapAlloc,
+				Unit:          cpuMetric.Unit,
+				SampledAt:     cpuMetric.SampledAt,
+				IntervalMs:    cpuMetric.IntervalMs,
+				LastError:     cpuMetric.LastError,
 			},
 			Memory: SystemInstanceResourceUsage{
-				UsagePercent: systemStatus.MemoryUsage,
+				Status:        memMetric.Status,
+				Scope:         memMetric.Scope,
+				Source:        memMetric.Source,
+				UsagePercent:  memMetric.UsagePercent,
+				UsedValue:     memMetric.UsedValue,
+				TotalCapacity: memMetric.TotalCapacity,
+				ProcessRSS:    memMetric.ProcessRSS,
+				GoHeapAlloc:   memMetric.GoHeapAlloc,
+				Unit:          memMetric.Unit,
+				SampledAt:     memMetric.SampledAt,
+				IntervalMs:    memMetric.IntervalMs,
+				LastError:     memMetric.LastError,
 			},
 			Storage: SystemInstanceStorageMetrics{
+				Status:      storageMetric.Status,
+				Scope:       storageMetric.Scope,
+				Source:      storageMetric.Source,
+				MountPoint:  storageMetric.MountPoint,
 				TotalBytes:  diskInfo.Total,
 				UsedBytes:   diskInfo.Used,
 				FreeBytes:   diskInfo.Free,
-				UsedPercent: diskInfo.UsedPercent,
+				UsedPercent: storageMetric.UsagePercent,
+				SampledAt:   storageMetric.SampledAt,
+				LastError:   storageMetric.LastError,
 			},
 		},
 	}

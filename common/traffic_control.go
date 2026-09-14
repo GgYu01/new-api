@@ -41,7 +41,7 @@ const (
 
 // TrafficControlDefaultsMigratedValue is the marker persisted after the
 // one-time default migration; its absence means the migration has not run.
-const TrafficControlDefaultsMigratedValue = "concurrency-240-20260904"
+const TrafficControlDefaultsMigratedValue = "concurrency-1000-20260909"
 
 var trafficControlOptionKeys = []string{
 	TrafficControlEnabledOption, TrafficControlModeOption, TrafficControlGlobalRPMOption,
@@ -65,8 +65,8 @@ type TrafficControlConfig struct {
 
 func DefaultTrafficControlConfig() TrafficControlConfig {
 	return TrafficControlConfig{
-		Enabled: true, Mode: TrafficControlModeConcurrency, GlobalRPM: 240, Burst: 32,
-		MaxActiveRequests: 240, WaitingQueue: 0, WaitingTimeoutMs: 0,
+		Enabled: true, Mode: TrafficControlModeConcurrency, GlobalRPM: 1000, Burst: 128,
+		MaxActiveRequests: 1000, WaitingQueue: 0, WaitingTimeoutMs: 0,
 	}
 }
 
