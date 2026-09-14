@@ -193,25 +193,138 @@ function RingProgress(props: RingProgressProps) {
 }
 
 type ResourceCellProps = {
-  value?: number
+  value?: number | null
+  detail?: ResourceMetricDetail
   tooltip?: ReactNode
 }
 
+function formatMetricPercent(value?: number | null, detail?: ResourceMetricDetail): string {
+  if (detail?.status === 'initializing') {
+    return 'init...'
+  }
+  if (detail?.status === 'disabled') {
+    return 'disabled'
+  }
+  if (detail?.status === 'unavailable') {
+    return 'N/A'
+  }
+  if (detail?.status === 'stale' || detail?.is_stale === true) {
+    if (typeof value === 'number' && !Number.isNaN(value)) {
+      return `${new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 }).format(value)}% (stale)`
+    }
+    return 'stale'
+  }
+  if (typeof value !== 'number' || Number.isNaN(value)) return '-'
+  if (value > 0 && value < 0.1) return '<0.1%'
+  return `${new Intl.NumberFormat(undefined, {
+    maximumFractionDigits: 1,
+  }).format(value)}%`
+}
+
 function ResourceCell(props: ResourceCellProps) {
+  const isStale =
+    props.detail?.status === 'stale' || props.detail?.is_stale === true
+  const isSpecialStatus =
+    (props.detail?.status && props.detail.status !== 'normal') || isStale
   const percent =
     typeof props.value === 'number' && !Number.isNaN(props.value)
       ? Math.max(0, Math.min(100, props.value))
       : null
+
   const content = (
     <div className='flex items-center gap-2'>
-      <RingProgress percent={percent} />
-      <span className='font-mono text-[11px] tabular-nums'>
-        {formatPercent(props.value)}
+      {!isSpecialStatus && <RingProgress percent={percent} />}
+      {isStale && <RingProgress percent={percent} />}
+      <span
+        className={cn(
+          'font-mono text-[11px] tabular-nums',
+          props.detail?.status === 'initializing' && 'text-amber-500 font-medium',
+          props.detail?.status === 'disabled' && 'text-muted-foreground italic',
+          props.detail?.status === 'unavailable' && 'text-red-500',
+          isStale && 'text-amber-600 dark:text-amber-400 font-medium'
+        )}
+      >
+        {formatMetricPercent(props.value, props.detail)}
       </span>
     </div>
   )
 
-  if (!props.tooltip) return content
+  const tooltipContent = props.tooltip || (props.detail ? (
+    <div className='space-y-1 text-xs'>
+      <div className='grid grid-cols-[auto_1fr] gap-x-3 gap-y-1'>
+        {props.detail.status && (
+          <>
+            <span className='text-muted-foreground' title='Telemetry status: normal, stale, initializing, unavailable, or disabled'>Status:</span>
+            <span className={cn('font-mono', isStale ? 'text-amber-600 dark:text-amber-400 font-medium' : '')}>
+              {props.detail.status} {isStale ? '(stale)' : ''}
+            </span>
+          </>
+        )}
+        {props.detail.scope && (
+          <>
+            <span className='text-muted-foreground' title='Measurement boundary: container, process, host, or unknown'>Scope:</span>
+            <span className='font-mono'>{props.detail.scope}</span>
+          </>
+        )}
+        {props.detail.source && (
+          <>
+            <span className='text-muted-foreground' title='Kernel or filesystem telemetry source'>Source:</span>
+            <span className='font-mono break-all'>{props.detail.source}</span>
+          </>
+        )}
+        {typeof props.detail.used_cores === 'number' && (
+          <>
+            <span className='text-muted-foreground' title='Active CPU cores utilized over last sample interval'>Used Cores:</span>
+            <span className='font-mono'>{props.detail.used_cores.toFixed(2)} / {props.detail.total_cores?.toFixed(1) || '-'}</span>
+          </>
+        )}
+        {typeof props.detail.used_value === 'number' && props.detail.unit === 'bytes' && (
+          <>
+            <span className='text-muted-foreground' title='Exact bytes currently consumed'>Used:</span>
+            <span className='font-mono'>{formatBytes(props.detail.used_value)}</span>
+          </>
+        )}
+        {typeof props.detail.total_capacity === 'number' && props.detail.unit === 'bytes' && (
+          <>
+            <span className='text-muted-foreground' title='Effective memory boundary (minimum of container and ancestor limits)'>Capacity:</span>
+            <span className='font-mono'>{formatBytes(props.detail.total_capacity)}</span>
+          </>
+        )}
+        {typeof props.detail.parent_capacity === 'number' && (
+          <>
+            <span className='text-muted-foreground text-amber-500' title='Tighter parent or ancestor slice limit'>Parent Limit:</span>
+            <span className='font-mono text-amber-600 dark:text-amber-400'>{formatBytes(props.detail.parent_capacity)}</span>
+          </>
+        )}
+        {typeof props.detail.process_rss === 'number' && (
+          <>
+            <span className='text-muted-foreground' title='Resident Set Size: physical RAM held by the process'>Process RSS:</span>
+            <span className='font-mono'>{formatBytes(props.detail.process_rss)}</span>
+          </>
+        )}
+        {typeof props.detail.go_heap_alloc === 'number' && (
+          <>
+            <span className='text-muted-foreground' title='Go runtime heap allocated bytes'>Go Heap:</span>
+            <span className='font-mono'>{formatBytes(props.detail.go_heap_alloc)}</span>
+          </>
+        )}
+        {props.detail.sampled_at && (
+          <>
+            <span className='text-muted-foreground'>Sampled At:</span>
+            <span className='font-mono'>{formatTimestampToDate(props.detail.sampled_at)}</span>
+          </>
+        )}
+        {props.detail.last_error && (
+          <>
+            <span className='text-muted-foreground text-red-400'>Last Error:</span>
+            <span className='font-mono text-red-400 break-all'>{props.detail.last_error}</span>
+          </>
+        )}
+      </div>
+    </div>
+  ) : undefined)
+
+  if (!tooltipContent) return content
 
   return (
     <TooltipProvider delay={100}>
@@ -219,7 +332,7 @@ function ResourceCell(props: ResourceCellProps) {
         <TooltipTrigger className='block w-full rounded-sm text-left focus-visible:ring-2 focus-visible:outline-none'>
           {content}
         </TooltipTrigger>
-        <TooltipContent className='max-w-80'>{props.tooltip}</TooltipContent>
+        <TooltipContent className='max-w-80'>{tooltipContent}</TooltipContent>
       </Tooltip>
     </TooltipProvider>
   )
@@ -382,18 +495,35 @@ function SystemInstancesList(props: SystemInstancesTableProps) {
                   </TooltipProvider>
                 </TableCell>
                 <TableCell className='py-2.5 align-middle'>
-                  <ResourceCell value={resources?.cpu?.usage_percent} />
+                  <ResourceCell
+                    value={resources?.cpu?.usage_percent}
+                    detail={resources?.cpu}
+                  />
                 </TableCell>
                 <TableCell className='py-2.5 align-middle'>
-                  <ResourceCell value={resources?.memory?.usage_percent} />
+                  <ResourceCell
+                    value={resources?.memory?.usage_percent}
+                    detail={resources?.memory}
+                  />
                 </TableCell>
                 <TableCell className='py-2.5 align-middle'>
                   <ResourceCell
                     value={storage?.used_percent}
+                    detail={storage}
                     tooltip={
                       storage ? (
                         <div className='space-y-1 text-xs'>
                           <div className='grid grid-cols-[auto_1fr] gap-x-3 gap-y-1'>
+                            {storage.mount_point && (
+                              <>
+                                <span className='text-muted-foreground'>
+                                  {t('Mount')}:
+                                </span>
+                                <span className='font-mono break-all'>
+                                  {storage.mount_point}
+                                </span>
+                              </>
+                            )}
                             <span className='text-muted-foreground'>
                               {t('Used')}
                             </span>
@@ -412,6 +542,16 @@ function SystemInstancesList(props: SystemInstancesTableProps) {
                             <span className='font-mono'>
                               {formatBytes(storage.total_bytes)}
                             </span>
+                            {storage.sampled_at && (
+                              <>
+                                <span className='text-muted-foreground'>
+                                  {t('Sampled At')}:
+                                </span>
+                                <span className='font-mono'>
+                                  {formatTimestampToDate(storage.sampled_at)}
+                                </span>
+                              </>
+                            )}
                           </div>
                         </div>
                       ) : undefined

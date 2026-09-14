@@ -18,6 +18,27 @@ For commercial licensing, please contact support@quantumnous.com
 */
 export type SystemInstanceStatus = 'online' | 'stale'
 
+export type ResourceMetricDetail = {
+  status?: string
+  scope?: string
+  source?: string
+  usage_percent?: number | null
+  used_value?: number
+  total_capacity?: number
+  parent_capacity?: number
+  used_cores?: number
+  total_cores?: number
+  process_rss?: number
+  go_heap_alloc?: number
+  mount_point?: string
+  unit?: string
+  sampled_at?: number
+  interval_ms?: number
+  last_error?: string
+  is_stale?: boolean
+  [key: string]: unknown
+}
+
 export type SystemInstanceInfo = {
   schema_version?: number
   node?: {
@@ -43,23 +64,17 @@ export type SystemInstanceInfo = {
     [key: string]: unknown
   }
   resources?: {
-    cpu?: {
-      usage_percent?: number
-      [key: string]: unknown
-    }
-    memory?: {
-      usage_percent?: number
-      [key: string]: unknown
-    }
-    storage?: {
+    cpu?: ResourceMetricDetail
+    memory?: ResourceMetricDetail
+    storage?: ResourceMetricDetail & {
       total_bytes?: number
       used_bytes?: number
       free_bytes?: number
-      used_percent?: number
-      [key: string]: unknown
+      used_percent?: number | null
     }
     [key: string]: unknown
   }
+  extra?: Record<string, unknown>
   [key: string]: unknown
 }
 

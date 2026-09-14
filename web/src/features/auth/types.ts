@@ -89,7 +89,24 @@ export interface ApiResponse<T = unknown> {
 // System Status
 // ============================================================================
 
+export interface BuildInfo {
+  version?: string
+  compiled_version?: string
+  runtime_override?: string
+  revision?: string
+  snapshot_id?: string
+  frontend_revision?: string
+  build_time?: string
+  go_version?: string
+  platform?: string
+  compiler?: string
+  is_dirty?: boolean
+  dirty_status?: 'clean' | 'dirty' | 'unknown'
+  has_vcs?: boolean
+}
+
 export interface SystemStatus {
+  build_info?: BuildInfo
   success?: boolean
   message?: string
   data?: {
