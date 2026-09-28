@@ -212,7 +212,7 @@ func appendBillingInfo(relayInfo *relaycommon.RelayInfo, other *model.LogOther) 
 			other.SetPublic("subscription_plan_title", relayInfo.SubscriptionPlanTitle)
 		}
 		if relayInfo.SubscriptionType != "" {
-			other["subscription_type"] = relayInfo.SubscriptionType
+			other.SetPublic("subscription_type", relayInfo.SubscriptionType)
 		}
 		// Compute "this request" subscription consumed + remaining
 		consumed := relayInfo.SubscriptionPreConsumed + relayInfo.SubscriptionPostDelta
