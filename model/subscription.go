@@ -1716,10 +1716,8 @@ func SettleSubscriptionPreConsumeWithToken(requestId string, delta int64, tokenI
 	})
 	if err == nil && applied && common.RedisEnabled && tokenKey != "" && tokenDelta != 0 {
 		gopool.Go(func() {
-			if tokenDelta > 0 {
-				_ = cacheDecrTokenQuota(tokenKey, tokenDelta)
-			} else {
-				_ = cacheIncrTokenQuota(tokenKey, -tokenDelta)
+			if _, err := cacheApplyTokenQuotaDelta(tokenId, tokenKey, -int64(tokenDelta)); err != nil {
+				common.SysLog("failed to apply token quota delta during subscription settle: " + err.Error())
 			}
 		})
 	}
@@ -1913,12 +1911,10 @@ func RecoverPendingTokenSettlements(olderThanSeconds int64, limit int) (int, err
 			continue
 		}
 
-		if common.RedisEnabled && tokenKey != "" {
+		if common.RedisEnabled && tokenKey != "" && tokenDelta != 0 {
 			gopool.Go(func() {
-				if tokenDelta > 0 {
-					_ = cacheDecrTokenQuota(tokenKey, tokenDelta)
-				} else if tokenDelta < 0 {
-					_ = cacheIncrTokenQuota(tokenKey, -tokenDelta)
+				if _, err := cacheApplyTokenQuotaDelta(tokenId, tokenKey, -int64(tokenDelta)); err != nil {
+					common.SysLog("failed to apply token quota delta during recovery: " + err.Error())
 				}
 			})
 		}
