@@ -40,17 +40,17 @@ func Distribute() func(c *gin.Context) {
 				service.RecordRequestPolicyTermination(c, types.NewErrorWithStatusCode(errors.New("request rejected"), types.ErrorCodeInvalidRequest, c.Writer.Status(), types.ErrOptionWithSkipRetry()))
 			}
 		}()
-		constraints := service.GetChannelConstraints(c)
-		constraints.AddFilter(taskdto.ChannelFilter{
-			Kind:        taskdto.FilterRequestPath,
-			RequestPath: c.Request.URL.Path,
-		})
-		service.AppendTaskPluginIdentityFilter(c, c.GetString("expected_task_plugin_key"))
-		modelRequest, shouldSelectChannel, err := getModelRequest(c)
 		requestPath := c.Request.URL.Path
 		if intent, matched := imagebridge.FromContext(c); matched {
 			requestPath = intent.UpstreamPath()
 		}
+		constraints := service.GetChannelConstraints(c)
+		constraints.AddFilter(taskdto.ChannelFilter{
+			Kind:        taskdto.FilterRequestPath,
+			RequestPath: requestPath,
+		})
+		service.AppendTaskPluginIdentityFilter(c, c.GetString("expected_task_plugin_key"))
+		modelRequest, shouldSelectChannel, err := getModelRequest(c)
 		if err != nil {
 			if common.IsRequestBodyStalledError(err) {
 				// Half-open client upload detected while spooling the body:
@@ -169,7 +169,7 @@ func Distribute() func(c *gin.Context) {
 				Ctx:         c,
 				ModelName:   modelRequest.Model,
 				TokenGroup:  usingGroup,
-				RequestPath: c.Request.URL.Path,
+				RequestPath: requestPath,
 				Retry:       common.GetPointer(0),
 			})
 			if selectErr != nil {
