@@ -23,6 +23,54 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestCalculateTextQuotaSummaryBillsEstimateWhenUpstreamOmitsUsage(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+
+	relayInfo := &relaycommon.RelayInfo{
+		OriginModelName: "gpt-5.6-sol",
+		IsStream:        true,
+		PriceData: hosttypes.PriceData{
+			ModelRatio:      1,
+			CompletionRatio: 1,
+			GroupRatioInfo:  hosttypes.GroupRatioInfo{GroupRatio: 1},
+		},
+		StartTime: time.Now(),
+	}
+	relayInfo.SetEstimatePromptTokens(164487)
+
+	summary := calculateTextQuotaSummary(ctx, relayInfo, &dto.Usage{})
+
+	require.Equal(t, 164487, summary.PromptTokens)
+	require.Equal(t, 164487, summary.TotalTokens)
+	require.Greater(t, summary.Quota, 0, "empty upstream usage must settle estimated prompt tokens, not refund pre-consume")
+}
+
+func TestCalculateTextQuotaSummaryDoesNotBillEstimateWhenClientGone(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+
+	relayInfo := &relaycommon.RelayInfo{
+		OriginModelName: "gpt-5.6-sol",
+		IsStream:        true,
+		StreamStatus: &relaycommon.StreamStatus{
+			EndReason: relaycommon.StreamEndReasonClientGone,
+		},
+		PriceData: hosttypes.PriceData{
+			ModelRatio:      1,
+			CompletionRatio: 1,
+			GroupRatioInfo:  hosttypes.GroupRatioInfo{GroupRatio: 1},
+		},
+		StartTime: time.Now(),
+	}
+	relayInfo.SetEstimatePromptTokens(164487)
+
+	summary := calculateTextQuotaSummary(ctx, relayInfo, &dto.Usage{})
+
+	require.Equal(t, 0, summary.PromptTokens)
+	require.Equal(t, 0, summary.Quota)
+}
+
 func TestMissingBillingDispositionPreservesClientCancellation(t *testing.T) {
 	clientGone := &relaycommon.RelayInfo{
 		IsStream: true,
