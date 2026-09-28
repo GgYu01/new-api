@@ -283,6 +283,59 @@ func TestStreamScannerHandler_ClientCancelAbortsUpstreamAndReturns(t *testing.T)
 	assert.NotContains(t, body, "second")
 }
 
+type immediateReadErrorBody struct {
+	err error
+}
+
+func (b *immediateReadErrorBody) Read(_ []byte) (int, error) {
+	return 0, b.err
+}
+
+func (b *immediateReadErrorBody) Close() error {
+	return nil
+}
+
+// A context-aware upstream body can report context.Canceled at the same time
+// the downstream request context closes. The scanner goroutine and the main
+// context watcher race in that case, but the observable reason must always be
+// client_gone rather than a fabricated upstream scanner failure.
+func TestStreamScannerHandler_CanceledBodyIsAlwaysClientGone(t *testing.T) {
+	for i := 0; i < 200; i++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		recorder := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(recorder)
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil).WithContext(ctx)
+		resp := &http.Response{Body: &immediateReadErrorBody{err: context.Canceled}}
+		info := &relaycommon.RelayInfo{
+			DisablePing: true,
+			ChannelMeta: &relaycommon.ChannelMeta{},
+		}
+
+		StreamScannerHandler(c, resp, info, func(data string, sr *StreamResult) {})
+
+		require.NotNil(t, info.StreamStatus)
+		assert.Equal(t, relaycommon.StreamEndReasonClientGone, info.StreamStatus.EndReason, "iteration %d", i)
+	}
+}
+
+func TestClassifyStreamScannerEndReasonUsesDownstreamContext(t *testing.T) {
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	assert.Equal(
+		t,
+		relaycommon.StreamEndReasonClientGone,
+		classifyStreamScannerEndReason(canceled, context.Canceled),
+	)
+	assert.Equal(
+		t,
+		relaycommon.StreamEndReasonScannerErr,
+		classifyStreamScannerEndReason(context.Background(), context.Canceled),
+	)
+}
+
 // ---------- Ping tests ----------
 
 func TestStreamScannerHandler_PingSentDuringSlowUpstream(t *testing.T) {
@@ -486,6 +539,48 @@ func TestStreamScannerHandler_StreamStatus_Timeout(t *testing.T) {
 	require.NotNil(t, info.StreamStatus)
 	assert.Equal(t, relaycommon.StreamEndReasonTimeout, info.StreamStatus.EndReason)
 	assert.False(t, info.StreamStatus.IsNormalEnd())
+}
+
+func TestStreamScannerHandler_StageAware_TTFTTimeout(t *testing.T) {
+	// 验证在首字产生前，如果上游无响应，TTFT 专用定时器超时并正确中止，不再盲等无进展
+	t.Setenv("FIRST_BYTE_TIMEOUT", "200ms")
+
+	pr, pw := io.Pipe()
+	go func() {
+		// 模拟上游死锁或静默
+		time.Sleep(1 * time.Second)
+		pw.Close()
+	}()
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+
+	resp := &http.Response{Body: pr}
+	info := &relaycommon.RelayInfo{
+		ChannelMeta: &relaycommon.ChannelMeta{
+			UpstreamModelName: "gpt-6-astra",
+		},
+	}
+
+	done := make(chan struct{})
+	start := time.Now()
+	go func() {
+		StreamScannerHandler(c, resp, info, func(data string, sr *StreamResult) {})
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for TTFT timeout")
+	}
+
+	elapsed := time.Since(start)
+	assert.Less(t, elapsed, 800*time.Millisecond, "TTFT timeout should fire promptly within configured window")
+	require.NotNil(t, info.StreamStatus)
+	assert.Equal(t, relaycommon.StreamEndReasonTimeout, info.StreamStatus.EndReason)
+	assert.Contains(t, info.StreamStatus.EndError.Error(), "ttft timeout")
 }
 
 func TestStreamScannerHandler_StreamStatus_SoftErrors(t *testing.T) {

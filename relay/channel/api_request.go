@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"regexp"
 	"strings"
@@ -12,10 +13,12 @@ import (
 	"time"
 
 	common2 "github.com/QuantumNous/new-api/common"
+	rootconstant "github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relay/helper"
+	"github.com/QuantumNous/new-api/relay/imagebridge"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
@@ -310,13 +313,58 @@ func applyHeaderOverrideToRequest(req *http.Request, headerOverride map[string]s
 	}
 }
 
+func applyTracingHeaders(headers *http.Header, c *gin.Context, info *common.RelayInfo) {
+	if headers == nil || c == nil {
+		return
+	}
+	serverExecID := c.GetString(common2.RequestIdKey)
+	if serverExecID == "" && info != nil {
+		serverExecID = info.RequestId
+	}
+
+	retryIndex := 0
+	if info != nil {
+		retryIndex = info.RetryIndex
+	}
+
+	if serverExecID != "" {
+		headers.Set("X-Request-Id", fmt.Sprintf("%s-%d", serverExecID, retryIndex))
+		headers.Set("X-Execution-Id", serverExecID)
+		headers.Set("X-Attempt-Index", fmt.Sprintf("%d", retryIndex))
+	}
+
+	externalReqID := c.GetString(common2.ContextKeyExternalRequestId)
+	if externalReqID == "" && c.Request != nil && c.Request.Header != nil {
+		externalReqID = strings.TrimSpace(c.Request.Header.Get("X-Client-Request-Id"))
+	}
+	if externalReqID != "" {
+		headers.Set("X-Client-Request-Id", externalReqID)
+	}
+
+	tp := c.GetString(common2.ContextKeyTraceparent)
+	if tp == "" && c.Request != nil && c.Request.Header != nil {
+		tp = strings.TrimSpace(c.Request.Header.Get("traceparent"))
+	}
+	if tp != "" {
+		headers.Set("traceparent", tp)
+	}
+
+	ts := c.GetString(common2.ContextKeyTracestate)
+	if ts == "" && c.Request != nil && c.Request.Header != nil {
+		ts = strings.TrimSpace(c.Request.Header.Get("tracestate"))
+	}
+	if ts != "" {
+		headers.Set("tracestate", ts)
+	}
+}
+
 func DoApiRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBody io.Reader) (*http.Response, error) {
 	fullRequestURL, err := a.GetRequestURL(info)
 	if err != nil {
 		return nil, fmt.Errorf("get request url failed: %w", err)
 	}
 	logger.LogDebug(c, "fullRequestURL: %s", common.SanitizeURLForLog(fullRequestURL))
-	req, err := http.NewRequest(c.Request.Method, fullRequestURL, requestBody)
+	req, err := http.NewRequestWithContext(c.Request.Context(), c.Request.Method, fullRequestURL, requestBody)
 	if err != nil {
 		return nil, fmt.Errorf("new request failed: %w", err)
 	}
@@ -326,8 +374,10 @@ func DoApiRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBody
 	if err != nil {
 		return nil, fmt.Errorf("setup request header failed: %w", err)
 	}
-	// 在 SetupRequestHeader 之后应用 Header Override，确保用户设置优先级最高
-	// 这样可以覆盖默认的 Authorization header 设置
+	applyTracingHeaders(&headers, c, info)
+
+	// Apply header overrides after SetupRequestHeader so caller configuration
+	// has final precedence over defaults such as Authorization.
 	headerOverride, err := processHeaderOverride(info, c)
 	if err != nil {
 		return nil, err
@@ -346,7 +396,7 @@ func DoFormRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBod
 		return nil, fmt.Errorf("get request url failed: %w", err)
 	}
 	logger.LogDebug(c, "fullRequestURL: %s", common.SanitizeURLForLog(fullRequestURL))
-	req, err := http.NewRequest(c.Request.Method, fullRequestURL, requestBody)
+	req, err := http.NewRequestWithContext(c.Request.Context(), c.Request.Method, fullRequestURL, requestBody)
 	if err != nil {
 		return nil, fmt.Errorf("new request failed: %w", err)
 	}
@@ -358,8 +408,10 @@ func DoFormRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBod
 	if err != nil {
 		return nil, fmt.Errorf("setup request header failed: %w", err)
 	}
-	// 在 SetupRequestHeader 之后应用 Header Override，确保用户设置优先级最高
-	// 这样可以覆盖默认的 Authorization header 设置
+	applyTracingHeaders(&headers, c, info)
+
+	// Apply header overrides after SetupRequestHeader so caller configuration
+	// has final precedence over defaults such as Authorization.
 	headerOverride, err := processHeaderOverride(info, c)
 	if err != nil {
 		return nil, err
@@ -387,8 +439,9 @@ func DoWssRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBody
 	if err != nil {
 		return nil, fmt.Errorf("setup request header failed: %w", err)
 	}
-	// 在 SetupRequestHeader 之后应用 Header Override，确保用户设置优先级最高
-	// 这样可以覆盖默认的 Authorization header 设置
+	applyTracingHeaders(&targetHeader, c, info)
+	// Apply header overrides after SetupRequestHeader so caller configuration
+	// has final precedence over defaults such as Authorization.
 	headerOverride, err := processHeaderOverride(info, c)
 	if err != nil {
 		return nil, err
@@ -397,7 +450,7 @@ func DoWssRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBody
 		targetHeader.Set(key, value)
 	}
 	targetHeader.Set("Content-Type", c.Request.Header.Get("Content-Type"))
-	dialer := *websocket.DefaultDialer
+	dialer := newDownstreamAwareWebsocketDialer(c.Request.Context())
 	if info.ChannelSetting.Proxy != "" {
 		proxyURL, _, proxyErr := common2.ParseProxyURLRuntime(info.ChannelSetting.Proxy)
 		if proxyErr != nil {
@@ -407,6 +460,10 @@ func DoWssRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBody
 	}
 	targetConn, resp, err := dialer.DialContext(c.Request.Context(), fullRequestURL, targetHeader)
 	if err != nil {
+		if contextErr := c.Request.Context().Err(); contextErr != nil {
+			logger.LogInfo(c, "websocket upstream request stopped because downstream context ended: "+contextErr.Error())
+			return nil, newDownstreamRequestEndedError("websocket downstream request ended", contextErr)
+		}
 		statusCode := http.StatusInternalServerError
 		if resp != nil {
 			statusCode = resp.StatusCode
@@ -432,6 +489,90 @@ func toWebSocketURL(raw string) string {
 	}
 }
 
+func newDownstreamRequestEndedError(message string, contextErr error) *types.NewAPIError {
+	return types.NewErrorWithStatusCode(
+		fmt.Errorf("%s: %w", message, contextErr),
+		types.ErrorCodeDownstreamCanceled,
+		499,
+		types.ErrOptionWithSkipRetry(),
+		types.ErrOptionWithNoRecordErrorLog(),
+	)
+}
+
+// downstreamAwareConn closes the upstream socket as soon as the downstream
+// request context ends. gorilla/websocket v1.5.0 only applies a context
+// deadline after TCP connect; cancellation alone does not interrupt a blocked
+// HTTP upgrade read, so the connection itself must be watched.
+type downstreamAwareConn struct {
+	net.Conn
+	callbackMu  sync.Mutex
+	stopContext func() bool
+	closeOnce   sync.Once
+	closeErr    error
+}
+
+func newDownstreamAwareConn(ctx context.Context, conn net.Conn) *downstreamAwareConn {
+	wrapped := &downstreamAwareConn{
+		Conn: conn,
+	}
+	// AfterFunc keeps no goroutine alive for the lifetime of a healthy
+	// WebSocket. It starts the close callback only if the context actually ends.
+	wrapped.callbackMu.Lock()
+	wrapped.stopContext = context.AfterFunc(ctx, func() {
+		_ = wrapped.Close()
+	})
+	wrapped.callbackMu.Unlock()
+	return wrapped
+}
+
+func (c *downstreamAwareConn) Close() error {
+	c.closeOnce.Do(func() {
+		c.callbackMu.Lock()
+		stopContext := c.stopContext
+		c.callbackMu.Unlock()
+		if stopContext != nil {
+			stopContext()
+		}
+		c.closeErr = c.Conn.Close()
+	})
+	return c.closeErr
+}
+
+func newDownstreamAwareWebsocketDialer(ctx context.Context) *websocket.Dialer {
+	dialer := *websocket.DefaultDialer
+	baseDialContext := dialer.NetDialContext
+	baseDial := dialer.NetDial
+	baseDialTLSContext := dialer.NetDialTLSContext
+	dialer.NetDialContext = func(dialCtx context.Context, network, address string) (net.Conn, error) {
+		var (
+			conn net.Conn
+			err  error
+		)
+		switch {
+		case baseDialContext != nil:
+			conn, err = baseDialContext(dialCtx, network, address)
+		case baseDial != nil:
+			conn, err = baseDial(network, address)
+		default:
+			conn, err = (&net.Dialer{}).DialContext(dialCtx, network, address)
+		}
+		if err != nil {
+			return nil, err
+		}
+		return newDownstreamAwareConn(ctx, conn), nil
+	}
+	if baseDialTLSContext != nil {
+		dialer.NetDialTLSContext = func(dialCtx context.Context, network, address string) (net.Conn, error) {
+			conn, err := baseDialTLSContext(dialCtx, network, address)
+			if err != nil {
+				return nil, err
+			}
+			return newDownstreamAwareConn(ctx, conn), nil
+		}
+	}
+	return &dialer
+}
+
 func startPingKeepAlive(c *gin.Context, pingInterval time.Duration) (context.CancelFunc, <-chan struct{}) {
 	pingerCtx, stopPinger := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -439,7 +580,7 @@ func startPingKeepAlive(c *gin.Context, pingInterval time.Duration) (context.Can
 	gopool.Go(func() {
 		defer close(done)
 		defer func() {
-			// 增加panic恢复处理
+			// Keep a failed client write from leaking the ping goroutine.
 			if r := recover(); r != nil {
 				logger.LogDebug(c, "SSE ping goroutine panic recovered: %v", r)
 			}
@@ -451,7 +592,7 @@ func startPingKeepAlive(c *gin.Context, pingInterval time.Duration) (context.Can
 		}
 
 		ticker := time.NewTicker(pingInterval)
-		// 确保在任何情况下都清理ticker
+		// Always release the ticker.
 		defer func() {
 			ticker.Stop()
 			logger.LogDebug(c, "SSE ping ticker stopped")
@@ -460,26 +601,26 @@ func startPingKeepAlive(c *gin.Context, pingInterval time.Duration) (context.Can
 		var pingMutex sync.Mutex
 		logger.LogDebug(c, "SSE ping goroutine started")
 
-		// 增加超时控制，防止goroutine长时间运行
-		maxPingDuration := 120 * time.Minute // 最大ping持续时间
+		// Bound the helper lifetime even if every other owner fails to stop it.
+		maxPingDuration := 120 * time.Minute
 		pingTimeout := time.NewTimer(maxPingDuration)
 		defer pingTimeout.Stop()
 
 		for {
 			select {
-			// 发送 ping 数据
+			// Send ping data.
 			case <-ticker.C:
 				if err := sendPingData(c, &pingMutex); err != nil {
 					logger.LogDebug(c, "SSE ping error, stopping goroutine: %s", err.Error())
 					return
 				}
-			// 收到退出信号
+			// Explicit stop signal.
 			case <-pingerCtx.Done():
 				return
-			// request 结束
+			// Downstream request ended.
 			case <-c.Request.Context().Done():
 				return
-			// 超时保护，防止goroutine无限运行
+			// Lifetime safety bound.
 			case <-pingTimeout.C:
 				logger.LogDebug(c, "SSE ping goroutine timeout, stopping")
 				return
@@ -505,6 +646,20 @@ func sendPingData(c *gin.Context, mutex *sync.Mutex) error {
 
 	logger.LogDebug(c, "SSE ping data sent")
 	return nil
+}
+
+var nativeImageBridgePingInterval = 15 * time.Second
+
+func wantsDownstreamSSE(c *gin.Context, info *common.RelayInfo) bool {
+	if info != nil && info.IsStream {
+		return true
+	}
+	return c != nil && common2.GetContextKeyBool(c, rootconstant.ContextKeyIsStream)
+}
+
+func forceNativeImageBridgePing(c *gin.Context) bool {
+	intent, ok := imagebridge.FromContext(c)
+	return ok && intent.Stream && intent.Envelope != imagebridge.EnvelopeImages
 }
 
 func DoRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http.Response, error) {
@@ -541,14 +696,18 @@ func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 
 	var stopPinger context.CancelFunc
 	var pingerDone <-chan struct{}
-	if info.IsStream {
+	if wantsDownstreamSSE(c, info) {
 		helper.SetEventStreamHeaders(c)
-		// 处理流式请求的 ping 保活
+		// Keep an established streaming response alive with legal SSE pings.
 		generalSettings := operation_setting.GetGeneralSetting()
-		if generalSettings.PingIntervalEnabled && !info.DisablePing {
+		forceBridgePing := forceNativeImageBridgePing(c)
+		if (generalSettings.PingIntervalEnabled || forceBridgePing) && !info.DisablePing {
 			pingInterval := time.Duration(generalSettings.PingIntervalSeconds) * time.Second
+			if forceBridgePing && (pingInterval <= 0 || pingInterval > nativeImageBridgePingInterval) {
+				pingInterval = nativeImageBridgePingInterval
+			}
 			stopPinger, pingerDone = startPingKeepAlive(c, pingInterval)
-			// 使用defer确保在任何情况下都能停止ping goroutine
+			// Stop and join the ping goroutine on every return path.
 			defer func() {
 				if stopPinger != nil {
 					stopPinger()
@@ -561,6 +720,10 @@ func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 
 	resp, err := relayClient.Do(req)
 	if err != nil {
+		if contextErr := req.Context().Err(); contextErr != nil {
+			logger.LogInfo(c, "upstream request stopped because downstream context ended: "+contextErr.Error())
+			return nil, newDownstreamRequestEndedError("downstream request ended", contextErr)
+		}
 		logger.LogError(c, "do request failed: "+err.Error())
 		return nil, types.NewError(err, types.ErrorCodeDoRequestFailed, types.ErrOptionWithHideErrMsg("upstream error: do request failed"))
 	}
@@ -579,8 +742,16 @@ func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 		))
 	}
 
-	if upID := resp.Header.Get(common2.RequestIdKey); upID != "" {
+	upID := resp.Header.Get(common2.UpstreamRequestIdKey)
+	if upID == "" {
+		upID = resp.Header.Get("X-Request-Id")
+	}
+	if upID == "" {
+		upID = resp.Header.Get(common2.RequestIdKey)
+	}
+	if upID != "" {
 		c.Set(common2.UpstreamRequestIdKey, upID)
+		c.Header(common2.UpstreamRequestIdKey, upID)
 	}
 
 	_ = req.Body.Close()

@@ -246,11 +246,7 @@ func calculateTextQuotaSummary(ctx *gin.Context, relayInfo *relaycommon.RelayInf
 	summary.IsClaudeUsageSemantic = summary.UsageSemantic == "anthropic"
 
 	if usage == nil {
-		usage = &dto.Usage{
-			PromptTokens:     relayInfo.GetEstimatePromptTokens(),
-			CompletionTokens: 0,
-			TotalTokens:      relayInfo.GetEstimatePromptTokens(),
-		}
+		usage = &dto.Usage{}
 	}
 
 	summary.PromptTokens = usage.PromptTokens
@@ -298,6 +294,19 @@ func calculateTextQuotaSummary(ctx *gin.Context, relayInfo *relaycommon.RelayInf
 
 	ratio := dModelRatio.Mul(dGroupRatio)
 	summary.ToolCallSurchargeQuota = calculateTextToolCallSurcharge(ctx, relayInfo, &summary)
+	if !summary.hasBillableUsage() {
+		if estimated := fallbackUsageForMissingTokens(relayInfo, usage); estimated != usage && estimated.PromptTokens > 0 {
+			usage = estimated
+			summary.PromptTokens = estimated.PromptTokens
+			summary.CompletionTokens = estimated.CompletionTokens
+			summary.TotalTokens = estimated.PromptTokens + estimated.CompletionTokens
+			dPromptTokens = decimal.NewFromInt(int64(summary.PromptTokens))
+			dCompletionTokens = decimal.NewFromInt(int64(summary.CompletionTokens))
+			if ctx != nil {
+				common.SetContextKey(ctx, constant.ContextKeyLocalCountTokens, true)
+			}
+		}
+	}
 
 	var audioInputQuota decimal.Decimal
 	if !relayInfo.PriceData.UsePrice {
@@ -390,10 +399,43 @@ func usageSemanticFromUsage(relayInfo *relaycommon.RelayInfo, usage *dto.Usage) 
 	return "openai"
 }
 
+func fallbackUsageForMissingTokens(relayInfo *relaycommon.RelayInfo, usage *dto.Usage) *dto.Usage {
+	if usage == nil {
+		usage = &dto.Usage{}
+	}
+	if usage.PromptTokens != 0 || usage.CompletionTokens != 0 || usage.TotalTokens != 0 {
+		return usage
+	}
+	if relayInfo != nil && relayInfo.IsStream && relayInfo.StreamStatus != nil &&
+		relayInfo.StreamStatus.EndReason == relaycommon.StreamEndReasonClientGone {
+		return usage
+	}
+	estimate := 0
+	if relayInfo != nil {
+		estimate = relayInfo.GetEstimatePromptTokens()
+	}
+	if estimate <= 0 {
+		return usage
+	}
+	cloned := *usage
+	cloned.PromptTokens = estimate
+	cloned.TotalTokens = estimate
+	return &cloned
+}
+
+func missingBillingDisposition(relayInfo *relaycommon.RelayInfo) (string, bool) {
+	if relayInfo != nil && relayInfo.IsStream && relayInfo.StreamStatus != nil &&
+		relayInfo.StreamStatus.EndReason == relaycommon.StreamEndReasonClientGone {
+		return "客户端已断开，请求已取消，未收到最终计费信息", true
+	}
+	return "上游没有返回计费信息，无法扣费（可能是上游超时）", false
+}
+
 func PostTextConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, usage *dto.Usage, extraContent []string) {
 	originUsage := usage
 	billingUsage := effectiveBillingUsage(usage)
-	if usage == nil {
+	missingBillingMessage, clientCanceled := missingBillingDisposition(relayInfo)
+	if usage == nil && !clientCanceled {
 		extraContent = append(extraContent, "上游无计费信息")
 	}
 	if originUsage != nil {
@@ -449,9 +491,17 @@ func PostTextConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, us
 		extraContent = append(extraContent, fmt.Sprintf("Audio Input 花费 %s", logger.LogQuota(common.QuotaFromDecimal(q))))
 	}
 
+	originHadTokens := originUsage != nil && (originUsage.PromptTokens != 0 || originUsage.CompletionTokens != 0 || originUsage.TotalTokens != 0)
+	if !originHadTokens && summary.PromptTokens > 0 && common.GetContextKeyBool(ctx, constant.ContextKeyLocalCountTokens) && !clientCanceled {
+		extraContent = append(extraContent, "上游未返回计费信息，已按预估输入 tokens 扣费")
+	}
 	if !summary.hasBillableUsage() {
-		extraContent = append(extraContent, "上游没有返回计费信息，无法扣费（可能是上游超时）")
-		logger.LogError(ctx, fmt.Sprintf("total tokens is 0, cannot consume quota, userId %d, channelId %d, tokenId %d, model %s， pre-consumed quota %d", relayInfo.UserId, relayInfo.ChannelId, relayInfo.TokenId, summary.ModelName, relayInfo.FinalPreConsumedQuota))
+		extraContent = append(extraContent, missingBillingMessage)
+		if clientCanceled {
+			logger.LogInfo(ctx, fmt.Sprintf("client disconnected before final billing usage, userId %d, channelId %d, tokenId %d, model %s, stream %s, received %d, pre-consumed quota %d", relayInfo.UserId, relayInfo.ChannelId, relayInfo.TokenId, summary.ModelName, relayInfo.StreamStatus.Summary(), relayInfo.ReceivedResponseCount, relayInfo.FinalPreConsumedQuota))
+		} else {
+			logger.LogError(ctx, fmt.Sprintf("total tokens is 0, cannot consume quota, userId %d, channelId %d, tokenId %d, model %s， pre-consumed quota %d", relayInfo.UserId, relayInfo.ChannelId, relayInfo.TokenId, summary.ModelName, relayInfo.FinalPreConsumedQuota))
+		}
 	} else {
 		model.UpdateUserUsedQuotaAndRequestCount(relayInfo.UserId, summary.Quota)
 		model.UpdateChannelUsedQuota(relayInfo.ChannelId, summary.Quota)

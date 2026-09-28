@@ -23,6 +23,7 @@ import { WorkerSettingsSection } from '../integrations/worker-settings-section'
 import { LogSettingsSection } from '../maintenance/log-settings-section'
 import { PerformanceSection } from '../maintenance/performance-section'
 import { UpdateCheckerSection } from '../maintenance/update-checker-section'
+import { TrafficControlSection } from './traffic-control-section'
 import type { OperationsSettings } from '../types'
 import { createSectionRegistry } from '../utils/section-registry'
 
@@ -125,6 +126,19 @@ const OPERATIONS_SECTIONS = [
             settings['performance_setting.monitor_disk_threshold'] ?? 95,
         }}
       />
+    ),
+  },
+  {
+    id: 'traffic-control',
+    titleKey: 'Traffic Control',
+    build: (settings: OperationsSettings) => (
+      <TrafficControlSection defaultValues={{
+        enabled: settings.TrafficControlEnabled,
+        mode: settings.TrafficControlMode,
+        global_rpm: settings.TrafficControlGlobalRPM,
+        burst: settings.TrafficControlBurst,
+        max_active_requests: settings.TrafficControlMaxActiveRequests,
+      }} />
     ),
   },
   {

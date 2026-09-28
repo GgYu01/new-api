@@ -34,7 +34,7 @@ func IsRequestBodyTooLargeError(err error) bool {
 }
 
 func GetRequestBody(c *gin.Context) (io.Seeker, error) {
-	// 首先检查是否有 BodyStorage 缓存
+	// Reuse request-owned replayable storage when it already exists.
 	if storage, exists := c.Get(KeyBodyStorage); exists && storage != nil {
 		if bs, ok := storage.(BodyStorage); ok {
 			if _, err := bs.Seek(0, io.SeekStart); err != nil {
@@ -43,13 +43,28 @@ func GetRequestBody(c *gin.Context) (io.Seeker, error) {
 			return bs, nil
 		}
 	}
+	maxMB := constant.MaxRequestBodyMB
+	if maxMB <= 0 {
+		maxMB = 128 // Default to 128 MiB.
+	}
+	maxBytes := int64(maxMB) << 20
 
-	// 检查旧的缓存方式
+	// Preserve compatibility with the legacy byte-slice cache.
 	cached, exists := c.Get(KeyRequestBody)
 	if exists && cached != nil {
 		if b, ok := cached.([]byte); ok {
-			bs, err := CreateBodyStorage(b)
+			c.Set(KeyRequestBody, nil)
+			bs, err := CreateBodyStorageFromReaderWithAdmission(
+				c.Request.Context(),
+				globalLargeBodyAdmission.Load(),
+				bytes.NewReader(b),
+				int64(len(b)),
+				maxBytes,
+			)
 			if err != nil {
+				if IsRequestBodyTooLargeError(err) {
+					return nil, errors.Wrap(ErrRequestBodyTooLarge, fmt.Sprintf("request body exceeds %d MB", maxMB))
+				}
 				return nil, err
 			}
 			c.Set(KeyBodyStorage, bs)
@@ -57,16 +72,19 @@ func GetRequestBody(c *gin.Context) (io.Seeker, error) {
 		}
 	}
 
-	maxMB := constant.MaxRequestBodyMB
-	if maxMB <= 0 {
-		maxMB = 128 // 默认 128MB
-	}
-	maxBytes := int64(maxMB) << 20
-
 	contentLength := c.Request.ContentLength
 
-	// 使用新的存储系统
-	storage, err := CreateBodyStorageFromReader(c.Request.Body, contentLength, maxBytes)
+	// Create request-owned replayable storage. Inbound body reads carry a
+	// no-progress deadline installed by common.StallGuardRoot at the server
+	// layer, so half-open client uploads fail fast instead of pinning the
+	// worker until the client's own timeout closes the connection.
+	storage, err := CreateBodyStorageFromReaderWithAdmission(
+		c.Request.Context(),
+		globalLargeBodyAdmission.Load(),
+		c.Request.Body,
+		contentLength,
+		maxBytes,
+	)
 	_ = c.Request.Body.Close()
 
 	if err != nil {
@@ -76,13 +94,13 @@ func GetRequestBody(c *gin.Context) (io.Seeker, error) {
 		return nil, err
 	}
 
-	// 缓存存储对象
+	// Attach storage to the request lifecycle.
 	c.Set(KeyBodyStorage, storage)
 
 	return storage, nil
 }
 
-// GetBodyStorage 获取请求体存储对象（用于需要多次读取的场景）
+// GetBodyStorage returns replayable request storage for callers that need it.
 func GetBodyStorage(c *gin.Context) (BodyStorage, error) {
 	seeker, err := GetRequestBody(c)
 	if err != nil {
@@ -95,7 +113,7 @@ func GetBodyStorage(c *gin.Context) (BodyStorage, error) {
 	return bs, nil
 }
 
-// CleanupBodyStorage 清理请求体存储（应在请求结束时调用）
+// CleanupBodyStorage releases request-owned storage at request completion.
 func CleanupBodyStorage(c *gin.Context) {
 	if storage, exists := c.Get(KeyBodyStorage); exists && storage != nil {
 		if bs, ok := storage.(BodyStorage); ok {

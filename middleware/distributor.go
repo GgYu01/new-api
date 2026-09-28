@@ -17,6 +17,7 @@ import (
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
+	"github.com/QuantumNous/new-api/relay/imagebridge"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
@@ -46,10 +47,74 @@ func Distribute() func(c *gin.Context) {
 		})
 		service.AppendTaskPluginIdentityFilter(c, c.GetString("expected_task_plugin_key"))
 		modelRequest, shouldSelectChannel, err := getModelRequest(c)
+		requestPath := c.Request.URL.Path
+		if intent, matched := imagebridge.FromContext(c); matched {
+			requestPath = intent.UpstreamPath()
+		}
 		if err != nil {
+			if common.IsRequestBodyStalledError(err) {
+				// Half-open client upload detected while spooling the body:
+				// fail fast with the stable stall code instead of a generic 400.
+				abortWithOpenAiMessage(c, http.StatusRequestTimeout, err.Error(), types.ErrorCodeRequestBodyStalled)
+				return
+			}
+			if common.IsRequestBodyTruncatedError(err) {
+				abortWithOpenAiMessage(c, http.StatusBadRequest, err.Error(), types.ErrorCodeRequestBodyTruncated)
+				return
+			}
 			abortWithOpenAiMessage(c, http.StatusBadRequest, i18n.T(c, i18n.MsgDistributorInvalidRequest, map[string]any{"Error": err.Error()}))
 			return
 		}
+		subscriptionAccess := model.SubscriptionAccess{}
+		if userID := c.GetInt("id"); userID > 0 {
+			var scopeErr error
+			subscriptionAccess, scopeErr = service.SubscriptionAccessForRequest(c, userID)
+			if scopeErr != nil {
+				abortWithOpenAiMessage(c, http.StatusServiceUnavailable, scopeErr.Error(), types.ErrorCodeModelNotFound)
+				return
+			}
+		}
+		if subscriptionAccess.Enforced {
+			if strings.TrimSpace(modelRequest.Model) == "" && shouldSelectChannel {
+				abortWithOpenAiMessage(c, http.StatusForbidden, i18n.T(c, i18n.MsgDistributorSubscriptionModelRequired), types.ErrorCodeModelNotFound)
+				return
+			}
+			if strings.TrimSpace(modelRequest.Model) != "" && !subscriptionAccess.AllowsRequestModel(modelRequest.Model, shouldSelectChannel) {
+				abortWithOpenAiMessage(c, http.StatusForbidden, i18n.T(c, i18n.MsgDistributorSubscriptionModelForbidden, map[string]any{"Model": modelRequest.Model}), types.ErrorCodeModelNotFound)
+				return
+			}
+		}
+		// A user's active subscriptions form a union, while each API key is
+		// bound to one billing scope. Enforce the key scope before selecting a
+		// channel so cross-provider requests cannot consume the other plan.
+		tokenScope := common.GetContextKeyString(c, constant.ContextKeyTokenSubscriptionType)
+		scopeExempt := common.GetContextKeyBool(c, constant.ContextKeyTokenScopeExempt)
+		if tokenScope != "" {
+			if strings.TrimSpace(modelRequest.Model) == "" && shouldSelectChannel {
+				abortWithOpenAiMessage(c, http.StatusForbidden, i18n.T(c, i18n.MsgDistributorSubscriptionModelRequired), types.ErrorCodeModelNotFound)
+				return
+			}
+			if strings.TrimSpace(modelRequest.Model) != "" && !model.TokenSubscriptionTypeAllowsModel(tokenScope, modelRequest.Model) {
+				abortWithOpenAiMessage(c, http.StatusForbidden, i18n.T(c, i18n.MsgDistributorSubscriptionModelForbidden, map[string]any{"Model": modelRequest.Model}), types.ErrorCodeModelNotFound)
+				return
+			}
+		} else if !scopeExempt && strings.TrimSpace(modelRequest.Model) != "" {
+			abortWithOpenAiMessage(c, http.StatusForbidden, i18n.T(c, i18n.MsgDistributorSubscriptionModelForbidden, map[string]any{"Model": modelRequest.Model}), types.ErrorCodeModelNotFound)
+			return
+		}
+		// Delisted models are a stable model_not_found, not a temporary no-channel
+		// 503. Enforce after subscription/key 403s and before token-specific or
+		// ordinary channel selection so those paths cannot serve or retry them.
+		if strings.TrimSpace(modelRequest.Model) != "" && service.IsDelistedModel(modelRequest.Model) {
+			abortWithOpenAiMessage(
+				c,
+				http.StatusNotFound,
+				fmt.Sprintf("The model '%s' does not exist or has been delisted", modelRequest.Model),
+				types.ErrorCodeModelNotFound,
+			)
+			return
+		}
+
 		_, pinned, _ := constraints.ResolvedPin()
 		if !pinned {
 			// Select a channel for the user
@@ -357,6 +422,9 @@ func getJSONStringValue(result gjson.Result, field string) (string, error) {
 }
 
 func getModelRequest(c *gin.Context) (*ModelRequest, bool, error) {
+	if intent, ok := imagebridge.FromContext(c); ok {
+		return &ModelRequest{Model: intent.Request.Model}, true, nil
+	}
 	var modelRequest ModelRequest
 	shouldSelectChannel := true
 	var err error
@@ -551,6 +619,9 @@ func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, mode
 	if channel == nil {
 		logTaskPluginChannelDecision(c, nil, modelName, "channel_rejected", "nil_channel")
 		return types.NewError(errors.New("channel is nil"), types.ErrorCodeGetChannelFailed, types.ErrOptionWithSkipRetry())
+	}
+	if !model.ChannelCanServeModel(channel, modelName) {
+		return types.NewErrorWithStatusCode(model.ErrSubscriptionModelNotAllowed, types.ErrorCodeModelNotFound, http.StatusForbidden, types.ErrOptionWithSkipRetry(), types.ErrOptionWithNoRecordErrorLog())
 	}
 	if expectedPlugin != "" && !channelMatchesExpectedTaskPlugin(c, channel, expectedPlugin) {
 		logTaskPluginChannelDecision(c, channel, modelName, "channel_rejected", "identity_mismatch")

@@ -2,26 +2,43 @@ package common
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
 )
 
-// DiskCacheType 磁盘缓存类型
+// DiskCacheType identifies a managed disk-cache file category.
 type DiskCacheType string
 
 const (
-	DiskCacheTypeBody DiskCacheType = "body" // 请求体缓存
-	DiskCacheTypeFile DiskCacheType = "file" // 文件数据缓存
+	DiskCacheTypeBody DiskCacheType = "body" // Request-body storage.
+	DiskCacheTypeFile DiskCacheType = "file" // Uploaded-file storage.
 )
 
-// 统一的缓存目录名
+// Shared cache directory name.
 const diskCacheDir = "new-api-body-cache"
 
-// GetDiskCacheDir 获取统一的磁盘缓存目录
-// 注意：每次调用都会重新计算，以响应配置变化
+var activeDiskCacheFiles sync.Map
+
+func registerActiveDiskCacheFile(filePath string) {
+	activeDiskCacheFiles.Store(filepath.Clean(filePath), struct{}{})
+}
+
+func unregisterActiveDiskCacheFile(filePath string) {
+	activeDiskCacheFiles.Delete(filepath.Clean(filePath))
+}
+
+func isActiveDiskCacheFile(filePath string) bool {
+	_, active := activeDiskCacheFiles.Load(filepath.Clean(filePath))
+	return active
+}
+
+// GetDiskCacheDir resolves the shared disk-cache directory on every call so
+// runtime configuration changes take effect.
 func GetDiskCacheDir() string {
 	cachePath := GetDiskCachePath()
 	if cachePath == "" {
@@ -30,15 +47,14 @@ func GetDiskCacheDir() string {
 	return filepath.Join(cachePath, diskCacheDir)
 }
 
-// EnsureDiskCacheDir 确保缓存目录存在
+// EnsureDiskCacheDir creates the cache directory when needed.
 func EnsureDiskCacheDir() error {
 	dir := GetDiskCacheDir()
 	return os.MkdirAll(dir, 0755)
 }
 
-// CreateDiskCacheFile 创建磁盘缓存文件
-// cacheType: 缓存类型（body/file）
-// 返回文件路径和文件句柄
+// CreateDiskCacheFile creates a managed body or file cache entry and returns
+// its path and open file handle.
 func CreateDiskCacheFile(cacheType DiskCacheType) (string, *os.File, error) {
 	if err := EnsureDiskCacheDir(); err != nil {
 		return "", nil, fmt.Errorf("failed to create cache directory: %w", err)
@@ -56,40 +72,151 @@ func CreateDiskCacheFile(cacheType DiskCacheType) (string, *os.File, error) {
 	return filePath, file, nil
 }
 
-// WriteDiskCacheFile 写入数据到磁盘缓存文件
-// 返回文件路径
+// WriteDiskCacheFile writes data to a managed cache file and returns its path.
 func WriteDiskCacheFile(cacheType DiskCacheType, data []byte) (string, error) {
+	if err := reserveDiskCacheBytes(int64(len(data))); err != nil {
+		return "", err
+	}
+	reserved := true
+	defer func() {
+		if reserved {
+			releaseDiskCacheBytes(int64(len(data)))
+		}
+	}()
 	filePath, file, err := CreateDiskCacheFile(cacheType)
 	if err != nil {
 		return "", err
 	}
 
+	registerActiveDiskCacheFile(filePath)
 	_, err = file.Write(data)
 	if err != nil {
 		file.Close()
 		os.Remove(filePath)
+		unregisterActiveDiskCacheFile(filePath)
 		return "", fmt.Errorf("failed to write cache file: %w", err)
 	}
 
 	if err := file.Close(); err != nil {
 		os.Remove(filePath)
+		unregisterActiveDiskCacheFile(filePath)
 		return "", fmt.Errorf("failed to close cache file: %w", err)
 	}
 
+	incrementDiskFileCount()
+	reserved = false
 	return filePath, nil
 }
 
-// WriteDiskCacheFileString 写入字符串到磁盘缓存文件
+// WriteDiskCacheFileString writes a string to a managed cache file.
 func WriteDiskCacheFileString(cacheType DiskCacheType, data string) (string, error) {
-	return WriteDiskCacheFile(cacheType, []byte(data))
+	if err := reserveDiskCacheBytes(int64(len(data))); err != nil {
+		return "", err
+	}
+	reserved := true
+	defer func() {
+		if reserved {
+			releaseDiskCacheBytes(int64(len(data)))
+		}
+	}()
+	filePath, file, err := CreateDiskCacheFile(cacheType)
+	if err != nil {
+		return "", err
+	}
+	registerActiveDiskCacheFile(filePath)
+	if _, err = io.WriteString(file, data); err != nil {
+		file.Close()
+		os.Remove(filePath)
+		unregisterActiveDiskCacheFile(filePath)
+		return "", fmt.Errorf("failed to write cache file: %w", err)
+	}
+	if err = file.Close(); err != nil {
+		os.Remove(filePath)
+		unregisterActiveDiskCacheFile(filePath)
+		return "", fmt.Errorf("failed to close cache file: %w", err)
+	}
+	incrementDiskFileCount()
+	reserved = false
+	return filePath, nil
 }
 
-// ReadDiskCacheFile 读取磁盘缓存文件
+func ReleaseDiskCacheFileOwnership(filePath string, size int64) {
+	unregisterActiveDiskCacheFile(filePath)
+	decrementDiskFileCount()
+	releaseDiskCacheBytes(size)
+}
+
+// ReservedDiskCacheWriter incrementally reserves every byte before it is
+// written and transfers the committed reservation to the returned file owner.
+type ReservedDiskCacheWriter struct {
+	file        *os.File
+	filePath    string
+	reservation *diskCacheReservation
+	written     int64
+	committed   bool
+}
+
+func NewReservedDiskCacheWriter(cacheType DiskCacheType, initialReservation int64) (*ReservedDiskCacheWriter, error) {
+	reservation := &diskCacheReservation{}
+	if err := reservation.ensure(initialReservation); err != nil {
+		return nil, err
+	}
+	filePath, file, err := CreateDiskCacheFile(cacheType)
+	if err != nil {
+		reservation.release()
+		return nil, err
+	}
+	registerActiveDiskCacheFile(filePath)
+	return &ReservedDiskCacheWriter{file: file, filePath: filePath, reservation: reservation}, nil
+}
+
+func (w *ReservedDiskCacheWriter) Write(data []byte) (int, error) {
+	target := w.written + int64(len(data))
+	if target < w.written {
+		return 0, ErrDiskCacheCapacityExhausted
+	}
+	if err := w.reservation.ensure(target); err != nil {
+		return 0, err
+	}
+	n, err := w.file.Write(data)
+	w.written += int64(n)
+	if err == nil && n != len(data) {
+		err = io.ErrShortWrite
+	}
+	return n, err
+}
+
+func (w *ReservedDiskCacheWriter) Commit() (string, int64, error) {
+	if w.committed {
+		return "", 0, fmt.Errorf("disk cache writer already committed")
+	}
+	if err := w.file.Close(); err != nil {
+		w.Abort()
+		return "", 0, err
+	}
+	w.reservation.trimTo(w.written)
+	incrementDiskFileCount()
+	w.committed = true
+	return w.filePath, w.written, nil
+}
+
+func (w *ReservedDiskCacheWriter) Abort() {
+	if w == nil || w.committed {
+		return
+	}
+	_ = w.file.Close()
+	_ = os.Remove(w.filePath)
+	unregisterActiveDiskCacheFile(w.filePath)
+	w.reservation.release()
+	w.committed = true
+}
+
+// ReadDiskCacheFile reads a managed cache file.
 func ReadDiskCacheFile(filePath string) ([]byte, error) {
 	return os.ReadFile(filePath)
 }
 
-// ReadDiskCacheFileString 读取磁盘缓存文件为字符串
+// ReadDiskCacheFileString reads a managed cache file as a string.
 func ReadDiskCacheFileString(filePath string) (string, error) {
 	data, err := os.ReadFile(filePath)
 	if err != nil {
@@ -98,21 +225,19 @@ func ReadDiskCacheFileString(filePath string) (string, error) {
 	return string(data), nil
 }
 
-// RemoveDiskCacheFile 删除磁盘缓存文件
+// RemoveDiskCacheFile removes a managed cache file.
 func RemoveDiskCacheFile(filePath string) error {
 	return os.Remove(filePath)
 }
 
-// CleanupOldDiskCacheFiles 清理旧的缓存文件
-// maxAge: 文件最大存活时间
-// 注意：此函数只删除文件，不更新统计（因为无法知道每个文件的原始大小）
+// CleanupOldDiskCacheFiles removes unowned files older than maxAge.
 func CleanupOldDiskCacheFiles(maxAge time.Duration) error {
 	dir := GetDiskCacheDir()
 
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil // 目录不存在，无需清理
+			return nil // A missing cache directory is already clean.
 		}
 		return err
 	}
@@ -127,9 +252,13 @@ func CleanupOldDiskCacheFiles(maxAge time.Duration) error {
 			continue
 		}
 		if now.Sub(info.ModTime()) > maxAge {
-			// 注意：后台清理任务删除文件时，由于无法得知原始 base64Size，
-			// 只能按磁盘文件大小扣减。这在目前 base64 存储模式下是准确的。
-			if err := os.Remove(filepath.Join(dir, entry.Name())); err == nil {
+			filePath := filepath.Join(dir, entry.Name())
+			if isActiveDiskCacheFile(filePath) {
+				continue
+			}
+			// Background cleanup only knows the on-disk size. That is exact for
+			// the current base64 storage representation.
+			if err := os.Remove(filePath); err == nil {
 				DecrementDiskFiles(info.Size())
 			}
 		}
@@ -137,7 +266,7 @@ func CleanupOldDiskCacheFiles(maxAge time.Duration) error {
 	return nil
 }
 
-// GetDiskCacheInfo 获取磁盘缓存目录信息
+// GetDiskCacheInfo reports the cache directory and configured limit.
 func GetDiskCacheInfo() (fileCount int, totalSize int64, err error) {
 	dir := GetDiskCacheDir()
 
@@ -163,7 +292,7 @@ func GetDiskCacheInfo() (fileCount int, totalSize int64, err error) {
 	return fileCount, totalSize, nil
 }
 
-// ShouldUseDiskCache 判断是否应该使用磁盘缓存
+// ShouldUseDiskCache reports whether a complete body should use disk storage.
 func ShouldUseDiskCache(dataSize int64) bool {
 	if !IsDiskCacheEnabled() {
 		return false
@@ -172,5 +301,5 @@ func ShouldUseDiskCache(dataSize int64) bool {
 	if dataSize < threshold {
 		return false
 	}
-	return IsDiskCacheAvailable(dataSize)
+	return true
 }

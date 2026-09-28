@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>New API - 额度充值中心</title>
+  <link rel="icon" type="image/x-icon" href="/favicon.ico">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            primary: {
+              DEFAULT: 'rgb(24 24 27)',
+              foreground: 'rgb(250 250 250)',
+              dark: 'rgb(250 250 250)',
+              darkfg: 'rgb(24 24 27)',
+            },
+            muted: {
+              DEFAULT: 'rgb(244 244 245)',
+              foreground: 'rgb(113 113 122)',
+              dark: 'rgb(39 39 42)',
+              darkfg: 'rgb(161 161 170)',
+            }
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    @keyframes pulse-subtle {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.92; transform: scale(1.02); }
+    }
+    .animate-pulse-subtle {
+      animation: pulse-subtle 2s infinite ease-in-out;
+    }
+    .toast-enter {
+      animation: slideDown 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+    }
+    @keyframes slideDown {
+      from { transform: translate(-50%, -20px); opacity: 0; }
+      to { transform: translate(-50%, 0); opacity: 1; }
+    }
+  </style>
+</head>
+<body class="bg-zinc-50 text-zinc-900 dark:bg-zinc-950 dark:text-zinc-100 min-h-screen transition-colors duration-200">
+  <!-- Toast Notification Container -->
+  <div id="toast-container" class="fixed top-5 left-1/2 -translate-x-1/2 z-50 pointer-events-none flex flex-col items-center gap-2"></div>
+
+  <!-- Header -->
+  <header class="sticky top-0 z-40 w-full border-b border-zinc-200/80 bg-white/80 backdrop-blur-md dark:border-zinc-800/80 dark:bg-zinc-900/80">
+    <div class="max-w-5xl mx-auto px-4 h-14 flex items-center justify-between">
+      <div class="flex items-center gap-2.5 cursor-pointer" onclick="window.location.href='/'">
+        <div class="h-8 w-8 rounded-lg bg-zinc-900 text-white dark:bg-white dark:text-zinc-900 flex items-center justify-center font-bold text-sm shadow-sm">
+          N
+        </div>
+        <span class="font-bold text-base tracking-tight">New API</span>
+        <span class="text-xs text-zinc-500 bg-zinc-100 dark:bg-zinc-800 px-2 py-0.5 rounded-full font-medium ml-1">充值中心</span>
+      </div>
+
+      <div class="flex items-center gap-3">
+        <button id="theme-toggle" class="p-2 rounded-lg text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800 transition-colors" title="切换明暗模式">
+          <svg id="theme-icon-sun" class="w-4 h-4 hidden dark:block" fill="none" stroke="currentColor" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2"></path><path d="M12 20v2"></path><path d="m4.93 4.93 1.41 1.41"></path><path d="m17.66 17.66 1.41 1.41"></path><path d="M2 12h2"></path><path d="M20 12h2"></path><path d="m6.34 17.66-1.41 1.41"></path><path d="m19.07 4.93-1.41 1.41"></path></svg>
+          <svg id="theme-icon-moon" class="w-4 h-4 block dark:hidden" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"></path></svg>
+        </button>
+        <a href="/" class="text-xs font-medium px-3 py-1.5 rounded-lg border border-zinc-200 dark:border-zinc-800 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors">
+          返回控制台
+        </a>
+      </div>
+    </div>
+  </header>
+
+  <main class="max-w-4xl mx-auto px-4 py-8 space-y-6">
+    <!-- Notice Banner -->
+    <div class="rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-4 sm:p-5 shadow-xs flex items-start gap-3">
+      <div class="p-2 rounded-lg bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 shrink-0">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
+      </div>
+      <div>
+        <div class="flex items-center gap-2">
+          <h2 class="text-sm sm:text-base font-semibold">New API 局域网快速充值中心</h2>
+          <span class="text-[11px] font-medium px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-400 border border-emerald-300 dark:border-emerald-800">
+            娱乐演示模式
+          </span>
+        </div>
+        <p class="text-xs sm:text-sm text-zinc-500 dark:text-zinc-400 mt-1">
+          本页面专供局域网测试展示与娱乐体验。点击任意档位与支付方式，均模拟充值成功并出具交易凭证，对真实账户零扣费、零影响。
+        </p>
+      </div>
+    </div>
+
+    <!-- Account Overview Card -->
+    <div class="rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-5 shadow-xs flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+      <div class="flex items-center gap-3.5">
+        <div class="w-12 h-12 rounded-full bg-zinc-100 dark:bg-zinc-800 flex items-center justify-center text-zinc-600 dark:text-zinc-300 font-semibold text-lg border border-zinc-200 dark:border-zinc-700">
+          U
+        </div>
+        <div>
+          <div class="flex items-center gap-2">
+            <span class="font-bold text-base sm:text-lg text-zinc-900 dark:text-zinc-100">局域网访客账户 (LAN Guest)</span>
+            <span class="text-[11px] px-2 py-0.5 rounded bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400 font-medium">免登录</span>
+          </div>
+          <p class="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">UID: lan_guest_2026 • 局域网直连测试</p>
+        </div>
+      </div>
+
+      <div class="flex items-center justify-between sm:justify-end gap-3 bg-zinc-50 dark:bg-zinc-800/60 rounded-xl p-3 sm:px-4 border border-zinc-200/80 dark:border-zinc-800">
+        <div class="text-left sm:text-right">
+          <div class="text-xs text-zinc-500 dark:text-zinc-400">可用算力额度</div>
+          <div id="display-balance" class="text-2xl font-black text-emerald-600 dark:text-emerald-400 font-mono">
+            $128.50
+          </div>
+        </div>
+        <div class="w-9 h-9 rounded-lg bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 flex items-center justify-center">
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 10h18M7 15h1m4 0h1m-7 4h12a3 3 0 003-3V8a3 3 0 00-3-3H6a3 3 0 00-3 3v8a3 3 0 003 3z"></path></svg>
+        </div>
+      </div>
+    </div>
+
+    <!-- Tier Selection Section -->
+    <div class="rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-5 sm:p-6 shadow-xs space-y-4">
+      <div class="flex items-center justify-between">
+        <div>
+          <h3 class="text-base sm:text-lg font-bold">选择充值档位</h3>
+          <p class="text-xs text-zinc-500 dark:text-zinc-400">所有档位均已配置最高赠送比例，点击即可直接切换</p>
+        </div>
+        <span class="text-xs text-zinc-400 font-mono">4 个档位可选</span>
+      </div>
+
+      <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5" id="tiers-container">
+        <!-- 200 Tier -->
+        <div onclick="selectTier(200, 20, 200, '新手优选', this)" class="tier-card group relative flex flex-col justify-between rounded-xl border p-4 cursor-pointer transition-all duration-200 border-zinc-200 dark:border-zinc-800 hover:border-zinc-400 dark:hover:border-zinc-600 bg-white dark:bg-zinc-900">
+          <div class="absolute -top-2.5 right-3 text-[10px] font-semibold px-2 py-0.5 rounded-full bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-300 border border-zinc-300 dark:border-zinc-700">
+            新手优选
+          </div>
+          <div>
+            <span class="text-xs text-zinc-400">充值面额</span>
+            <div class="text-3xl font-extrabold mt-1 text-zinc-900 dark:text-zinc-100">¥200</div>
+            <div class="mt-2 flex items-center gap-1 text-xs font-semibold text-emerald-600 dark:text-emerald-400">
+              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v13m0-13V6a2 2 0 112 2h-2zm0 0V4a2 2 0 10-2 2h2m0 0v4m0 0h4m-4 0H8"></path></svg>
+              <span>加赠 ¥20 体验金</span>
+            </div>
+            <p class="text-xs text-zinc-500 mt-2">到账 $200 额度 + 赠送 ¥20</p>
+          </div>
+          <div class="mt-4 pt-3 border-t border-zinc-100 dark:border-zinc-800 flex items-center justify-between">
+            <span class="text-xs text-zinc-400">到账: <strong class="text-zinc-800 dark:text-zinc-200">$200</strong></span>
+            <div class="check-icon w-5 h-5 rounded-full border border-zinc-300 dark:border-zinc-700 flex items-center justify-center text-transparent">✓</div>
+          </div>
+        </div>
+
+        <!-- 500 Tier -->
+        <div onclick="selectTier(500, 60, 500, '特惠推荐', this)" class="tier-card group relative flex flex-col justify-between rounded-xl border p-4 cursor-pointer transition-all duration-200 border-zinc-200 dark:border-zinc-800 hover:border-zinc-400 dark:hover:border-zinc-600 bg-white dark:bg-zinc-900">
+          <div class="absolute -top-2.5 right-3 text-[10px] font-semibold px-2 py-0.5 rounded-full bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-300 border border-zinc-300 dark:border-zinc-700">
+            特惠推荐
+          </div>
+          <div>
+            <span class="text-xs text-zinc-400">充值面额</span>
+            <div class="text-3xl font-extrabold mt-1 text-zinc-900 dark:text-zinc-100">¥500</div>
+            <div class="mt-2 flex items-center gap-1 text-xs font-semibold text-emerald-600 dark:text-emerald-400">
+              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v13m0-13V6a2 2 0 112 2h-2zm0 0V4a2 2 0 10-2 2h2m0 0v4m0 0h4m-4 0H8"></path></svg>
+              <span>加赠 ¥60 体验金</span>
+            </div>
+            <p class="text-xs text-zinc-500 mt-2">到账 $500 额度 + 赠送 ¥60</p>
+          </div>
+          <div class="mt-4 pt-3 border-t border-zinc-100 dark:border-zinc-800 flex items-center justify-between">
+            <span class="text-xs text-zinc-400">到账: <strong class="text-zinc-800 dark:text-zinc-200">$500</strong></span>
+            <div class="check-icon w-5 h-5 rounded-full border border-zinc-300 dark:border-zinc-700 flex items-center justify-center text-transparent">✓</div>
+          </div>
+        </div>
+
+        <!-- 1000 Tier (Selected by default) -->
+        <div onclick="selectTier(1000, 150, 1000, '人气热销 🔥', this)" class="tier-card selected-tier group relative flex flex-col justify-between rounded-xl border-2 border-zinc-900 dark:border-zinc-100 p-4 cursor-pointer transition-all duration-200 bg-zinc-100/60 dark:bg-zinc-800/50 shadow-sm">
+          <div class="absolute -top-2.5 right-3 text-[10px] font-bold px-2 py-0.5 rounded-full bg-zinc-900 text-white dark:bg-white dark:text-zinc-900 shadow-xs">
+            人气热销 🔥
+          </div>
+          <div>
+            <span class="text-xs text-zinc-400">充值面额</span>
+            <div class="text-3xl font-extrabold mt-1 text-zinc-900 dark:text-zinc-100">¥1000</div>
+            <div class="mt-2 flex items-center gap-1 text-xs font-semibold text-emerald-600 dark:text-emerald-400">
+              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v13m0-13V6a2 2 0 112 2h-2zm0 0V4a2 2 0 10-2 2h2m0 0v4m0 0h4m-4 0H8"></path></svg>
+              <span>加赠 ¥150 体验金</span>
+            </div>
+            <p class="text-xs text-zinc-500 mt-2">到账 $1,000 额度 + 赠送 ¥150</p>
+          </div>
+          <div class="mt-4 pt-3 border-t border-zinc-200 dark:border-zinc-700 flex items-center justify-between">
+            <span class="text-xs text-zinc-400">到账: <strong class="text-zinc-800 dark:text-zinc-200">$1000</strong></span>
+            <div class="check-icon w-5 h-5 rounded-full bg-zinc-900 dark:bg-white text-white dark:text-zinc-900 flex items-center justify-center text-xs font-bold">✓</div>
+          </div>
+        </div>
+
+        <!-- 5000 Tier -->
+        <div onclick="selectTier(5000, 1000, 5000, '企业尊享 👑', this)" class="tier-card group relative flex flex-col justify-between rounded-xl border p-4 cursor-pointer transition-all duration-200 border-zinc-200 dark:border-zinc-800 hover:border-zinc-400 dark:hover:border-zinc-600 bg-white dark:bg-zinc-900">
+          <div class="absolute -top-2.5 right-3 text-[10px] font-semibold px-2 py-0.5 rounded-full bg-amber-100 text-amber-900 dark:bg-amber-950 dark:text-amber-300 border border-amber-300 dark:border-amber-800">
+            企业尊享 👑
+          </div>
+          <div>
+            <span class="text-xs text-zinc-400">充值面额</span>
+            <div class="text-3xl font-extrabold mt-1 text-zinc-900 dark:text-zinc-100">¥5000</div>
+            <div class="mt-2 flex items-center gap-1 text-xs font-semibold text-emerald-600 dark:text-emerald-400">
+              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v13m0-13V6a2 2 0 112 2h-2zm0 0V4a2 2 0 10-2 2h2m0 0v4m0 0h4m-4 0H8"></path></svg>
+              <span>加赠 ¥1,000 体验金</span>
+            </div>
+            <p class="text-xs text-zinc-500 mt-2">到账 $5,000 额度 + 赠送 ¥1,000</p>
+          </div>
+          <div class="mt-4 pt-3 border-t border-zinc-100 dark:border-zinc-800 flex items-center justify-between">
+            <span class="text-xs text-zinc-400">到账: <strong class="text-zinc-800 dark:text-zinc-200">$5000</strong></span>
+            <div class="check-icon w-5 h-5 rounded-full border border-zinc-300 dark:border-zinc-700 flex items-center justify-center text-transparent">✓</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Payment Methods & Action -->
+    <div class="rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-5 sm:p-6 shadow-xs space-y-6">
+      <div>
+        <h3 class="text-base sm:text-lg font-bold">支付方式</h3>
+        <p class="text-xs text-zinc-500 dark:text-zinc-400">支持主流快捷支付与官方安全通道</p>
+      </div>
+
+      <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <button onclick="selectMethod('wechat', '微信支付', this)" class="pay-method-btn flex items-center justify-between p-3 rounded-lg border-2 border-zinc-900 dark:border-zinc-100 bg-zinc-50 dark:bg-zinc-800/80 transition-all text-left">
+          <div class="flex items-center gap-2.5">
+            <div class="w-7 h-7 rounded-md bg-emerald-500 text-white flex items-center justify-center font-bold text-xs shadow-xs">微</div>
+            <span class="text-sm font-medium">微信支付</span>
+          </div>
+          <span class="text-[10px] px-1.5 py-0.5 rounded bg-emerald-100 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-400 font-medium">推荐</span>
+        </button>
+
+        <button onclick="selectMethod('alipay', '支付宝', this)" class="pay-method-btn flex items-center justify-between p-3 rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 hover:bg-zinc-50 dark:hover:bg-zinc-800/50 transition-all text-left">
+          <div class="flex items-center gap-2.5">
+            <div class="w-7 h-7 rounded-md bg-sky-500 text-white flex items-center justify-center font-bold text-xs shadow-xs">支</div>
+            <span class="text-sm font-medium">支付宝</span>
+          </div>
+          <span class="text-[10px] px-1.5 py-0.5 rounded bg-sky-100 dark:bg-sky-950 text-sky-700 dark:text-sky-400 font-medium">快捷</span>
+        </button>
+
+        <button onclick="selectMethod('unionpay', '银联云闪付', this)" class="pay-method-btn flex items-center justify-between p-3 rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 hover:bg-zinc-50 dark:hover:bg-zinc-800/50 transition-all text-left">
+          <div class="flex items-center gap-2.5">
+            <div class="w-7 h-7 rounded-md bg-rose-600 text-white flex items-center justify-center font-bold text-xs shadow-xs">卡</div>
+            <span class="text-sm font-medium">银联闪付</span>
+          </div>
+        </button>
+
+        <button onclick="selectMethod('applepay', 'Apple Pay', this)" class="pay-method-btn flex items-center justify-between p-3 rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 hover:bg-zinc-50 dark:hover:bg-zinc-800/50 transition-all text-left">
+          <div class="flex items-center gap-2.5">
+            <div class="w-7 h-7 rounded-md bg-zinc-900 dark:bg-white text-white dark:text-zinc-900 flex items-center justify-center font-bold text-xs shadow-xs"></div>
+            <span class="text-sm font-medium">Apple Pay</span>
+          </div>
+        </button>
+      </div>
+
+      <div class="pt-4 border-t border-zinc-200 dark:border-zinc-800 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+        <div>
+          <div class="text-xs text-zinc-500 dark:text-zinc-400">应付总额</div>
+          <div class="flex items-baseline gap-2 mt-0.5">
+            <span id="summary-price" class="text-3xl font-extrabold text-zinc-900 dark:text-zinc-100">¥1000.00</span>
+            <span id="summary-benefit" class="text-xs text-emerald-600 dark:text-emerald-400 font-medium">
+              (实际到账 $1000 + 赠送 ¥150)
+            </span>
+          </div>
+        </div>
+
+        <button id="pay-btn" onclick="executePayment()" class="h-12 px-8 rounded-xl bg-zinc-900 text-white dark:bg-white dark:text-zinc-900 font-bold text-base hover:opacity-90 active:scale-98 transition-all flex items-center justify-center gap-2 shadow-md">
+          <svg id="pay-spinner" class="w-5 h-5 animate-spin hidden" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+          <span id="pay-text">立即充值 ¥1000</span>
+        </button>
+      </div>
+    </div>
+  </main>
+
+  <!-- Success Modal -->
+  <div id="success-modal" class="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4 hidden">
+    <div class="bg-white dark:bg-zinc-900 rounded-2xl max-w-md w-full p-6 space-y-5 border border-zinc-200 dark:border-zinc-800 shadow-2xl animate-pulse-subtle">
+      <div class="text-center space-y-2">
+        <div class="w-16 h-16 rounded-full bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 mx-auto flex items-center justify-center">
+          <svg class="w-9 h-9" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"></path></svg>
+        </div>
+        <h3 class="text-2xl font-black tracking-tight text-zinc-900 dark:text-zinc-100">🎉 充值成功！</h3>
+        <p class="text-xs sm:text-sm text-zinc-500 dark:text-zinc-400">
+          已成功充值额度至当前账户，实时到账生效
+        </p>
+      </div>
+
+      <div class="rounded-xl border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-800/50 p-4 space-y-2.5 text-xs sm:text-sm">
+        <div class="flex justify-between">
+          <span class="text-zinc-400">交易单号</span>
+          <span id="receipt-order-id" class="font-mono font-medium text-zinc-900 dark:text-zinc-100">NEWAPI-20260922-888888</span>
+        </div>
+        <div class="flex justify-between">
+          <span class="text-zinc-400">支付方式</span>
+          <span id="receipt-method" class="font-medium text-zinc-900 dark:text-zinc-100">微信支付</span>
+        </div>
+        <div class="flex justify-between">
+          <span class="text-zinc-400">充值面额</span>
+          <span id="receipt-amount" class="font-bold text-zinc-900 dark:text-zinc-100">¥1000.00</span>
+        </div>
+        <div class="flex justify-between">
+          <span class="text-zinc-400">额外赠送</span>
+          <span id="receipt-bonus" class="font-bold text-emerald-600 dark:text-emerald-400">+¥150.00</span>
+        </div>
+        <div class="flex justify-between">
+          <span class="text-zinc-400">交易时间</span>
+          <span id="receipt-time" class="text-zinc-500">2026-09-22 22:30:00</span>
+        </div>
+        <div class="pt-2 border-t border-zinc-200 dark:border-zinc-700 flex justify-between items-center">
+          <span class="font-medium">到账状态</span>
+          <span class="px-2 py-0.5 rounded-full text-xs font-semibold bg-emerald-100 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-400 border border-emerald-300 dark:border-emerald-800">
+            已入账 (即时到账)
+          </span>
+        </div>
+      </div>
+
+      <div class="rounded-lg bg-amber-500/10 border border-amber-500/20 p-2.5 text-center text-xs text-amber-700 dark:text-amber-400">
+        💡 局域网娱乐演示：本次充值不产生任何真实扣费，对真实账号 0 影响。
+      </div>
+
+      <button onclick="closeModal()" class="w-full h-11 rounded-xl bg-zinc-900 text-white dark:bg-white dark:text-zinc-900 font-bold hover:opacity-90 transition-opacity">
+        完成并继续
+      </button>
+    </div>
+  </div>
+
+  <script>
+    let currentTier = { amount: 1000, bonus: 150, quota: 1000, tag: '人气热销 🔥' };
+    let currentMethod = { type: 'wechat', name: '微信支付' };
+    let balance = 128.50;
+
+    function selectTier(amount, bonus, quota, tag, el) {
+      currentTier = { amount, bonus, quota, tag };
+      document.querySelectorAll('.tier-card').forEach(card => {
+        card.classList.remove('selected-tier', 'border-2', 'border-zinc-900', 'dark:border-zinc-100', 'bg-zinc-100/60', 'dark:bg-zinc-800/50', 'shadow-sm');
+        card.classList.add('border', 'border-zinc-200', 'dark:border-zinc-800', 'bg-white', 'dark:bg-zinc-900');
+        const icon = card.querySelector('.check-icon');
+        icon.className = 'check-icon w-5 h-5 rounded-full border border-zinc-300 dark:border-zinc-700 flex items-center justify-center text-transparent';
+      });
+
+      el.classList.add('selected-tier', 'border-2', 'border-zinc-900', 'dark:border-zinc-100', 'bg-zinc-100/60', 'dark:bg-zinc-800/50', 'shadow-sm');
+      el.classList.remove('border', 'border-zinc-200', 'dark:border-zinc-800', 'bg-white', 'dark:bg-zinc-900');
+      const activeIcon = el.querySelector('.check-icon');
+      activeIcon.className = 'check-icon w-5 h-5 rounded-full bg-zinc-900 dark:bg-white text-white dark:text-zinc-900 flex items-center justify-center text-xs font-bold';
+
+      document.getElementById('summary-price').textContent = '¥' + amount + '.00';
+      document.getElementById('summary-benefit').textContent = `(实际到账 $${quota} + 赠送 ¥${bonus})`;
+      document.getElementById('pay-text').textContent = '立即充值 ¥' + amount;
+    }
+
+    function selectMethod(type, name, el) {
+      currentMethod = { type, name };
+      document.querySelectorAll('.pay-method-btn').forEach(btn => {
+        btn.classList.remove('border-2', 'border-zinc-900', 'dark:border-zinc-100', 'bg-zinc-50', 'dark:bg-zinc-800/80');
+        btn.classList.add('border', 'border-zinc-200', 'dark:border-zinc-800', 'bg-white', 'dark:bg-zinc-900');
+      });
+      el.classList.add('border-2', 'border-zinc-900', 'dark:border-zinc-100', 'bg-zinc-50', 'dark:bg-zinc-800/80');
+      el.classList.remove('border', 'border-zinc-200', 'dark:border-zinc-800', 'bg-white', 'dark:bg-zinc-900');
+    }
+
+    function showToast(title, desc) {
+      const container = document.getElementById('toast-container');
+      const toast = document.createElement('div');
+      toast.className = 'toast-enter pointer-events-auto bg-zinc-900 text-white dark:bg-white dark:text-zinc-900 px-4 py-3 rounded-xl shadow-xl border border-zinc-700/50 dark:border-zinc-300 flex items-center gap-3 text-xs sm:text-sm font-medium';
+      toast.innerHTML = `
+        <span class="text-emerald-400 dark:text-emerald-600 font-bold">✓</span>
+        <div>
+          <div class="font-bold">${title}</div>
+          <div class="text-[11px] opacity-75">${desc}</div>
+        </div>
+      `;
+      container.appendChild(toast);
+      setTimeout(() => {
+        toast.style.opacity = '0';
+        toast.style.transform = 'translate(-50%, -10px)';
+        toast.style.transition = 'all 0.3s ease';
+        setTimeout(() => toast.remove(), 300);
+      }, 3500);
+    }
+
+    function executePayment() {
+      const btn = document.getElementById('pay-btn');
+      const spinner = document.getElementById('pay-spinner');
+      const text = document.getElementById('pay-text');
+
+      btn.disabled = true;
+      spinner.classList.remove('hidden');
+      text.textContent = '正在拉起安全支付...';
+
+      setTimeout(() => {
+        btn.disabled = false;
+        spinner.classList.add('hidden');
+        text.textContent = '立即充值 ¥' + currentTier.amount;
+
+        // Populate receipt
+        const now = new Date();
+        const randomId = 'NEWAPI-' + now.toISOString().slice(0, 10).replace(/-/g, '') + '-' + Math.floor(100000 + Math.random() * 900000);
+        const timeStr = now.getFullYear() + '-' + String(now.getMonth()+1).padStart(2,'0') + '-' + String(now.getDate()).padStart(2,'0') + ' ' +
+                        String(now.getHours()).padStart(2,'0') + ':' + String(now.getMinutes()).padStart(2,'0') + ':' + String(now.getSeconds()).padStart(2,'0');
+
+        document.getElementById('receipt-order-id').textContent = randomId;
+        document.getElementById('receipt-method').textContent = currentMethod.name;
+        document.getElementById('receipt-amount').textContent = '¥' + currentTier.amount + '.00';
+        document.getElementById('receipt-bonus').textContent = '+¥' + currentTier.bonus + '.00';
+        document.getElementById('receipt-time').textContent = timeStr;
+
+        // Update local balance
+        balance += currentTier.quota;
+        document.getElementById('display-balance').textContent = '$' + balance.toFixed(2);
+
+        // Show dialog & toast
+        document.getElementById('success-modal').classList.remove('hidden');
+        showToast('🎉 充值成功！', `已成功为当前账户充值 ¥${currentTier.amount} 额度`);
+      }, 650);
+    }
+
+    function closeModal() {
+      document.getElementById('success-modal').classList.add('hidden');
+    }
+
+    // Theme toggle
+    const themeToggle = document.getElementById('theme-toggle');
+    if (window.matchMedia('(prefers-color-scheme: dark)').matches) {
+      document.documentElement.classList.add('dark');
+    }
+    themeToggle.addEventListener('click', () => {
+      document.documentElement.classList.toggle('dark');
+    });
+  </script>
+</body>
+</html>

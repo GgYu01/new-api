@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/gin-gonic/gin"
 )
@@ -13,23 +14,31 @@ import (
 // SystemPerformanceCheck 检查系统性能中间件
 func SystemPerformanceCheck() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		if !common.GetPerformanceMonitorConfig().Enabled {
+			c.Next()
+			return
+		}
 		// 仅检查 Relay 接口 (/v1, /v1beta 等)
 		// 这里简单判断路径前缀，可以根据实际路由调整
 		path := c.Request.URL.Path
 		if strings.HasPrefix(path, "/v1/messages") {
 			if err := checkSystemPerformance(); err != nil {
+				c.Header("X-NewAPI-Early-Exit-Stage", "performance_guard")
 				c.JSON(err.StatusCode, gin.H{
 					"error": err.ToClaudeError(),
 				})
 				c.Abort()
+				logger.LogError(c, fmt.Sprintf("performance guard early exit: %s", err.Error()))
 				return
 			}
 		} else {
 			if err := checkSystemPerformance(); err != nil {
+				c.Header("X-NewAPI-Early-Exit-Stage", "performance_guard")
 				c.JSON(err.StatusCode, gin.H{
 					"error": err.ToOpenAIError(),
 				})
 				c.Abort()
+				logger.LogError(c, fmt.Sprintf("performance guard early exit: %s", err.Error()))
 				return
 			}
 		}

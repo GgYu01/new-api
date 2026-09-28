@@ -16,6 +16,7 @@ import (
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/QuantumNous/new-api/setting/system_setting"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type Option struct {
@@ -149,6 +150,14 @@ func InitOptionMap() {
 	common.OptionMap["ModelRequestRateLimitDurationMinutes"] = strconv.Itoa(setting.ModelRequestRateLimitDurationMinutes)
 	common.OptionMap["ModelRequestRateLimitSuccessCount"] = strconv.Itoa(setting.ModelRequestRateLimitSuccessCount)
 	common.OptionMap["ModelRequestRateLimitGroup"] = setting.ModelRequestRateLimitGroup2JSONString()
+	trafficCfg := common.DefaultTrafficControlConfig()
+	common.OptionMap[common.TrafficControlEnabledOption] = strconv.FormatBool(trafficCfg.Enabled)
+	common.OptionMap[common.TrafficControlModeOption] = string(trafficCfg.Mode)
+	common.OptionMap[common.TrafficControlGlobalRPMOption] = strconv.FormatInt(trafficCfg.GlobalRPM, 10)
+	common.OptionMap[common.TrafficControlBurstOption] = strconv.FormatInt(trafficCfg.Burst, 10)
+	common.OptionMap[common.TrafficControlMaxActiveOption] = strconv.FormatInt(trafficCfg.MaxActiveRequests, 10)
+	common.OptionMap[common.TrafficControlWaitingQueueOption] = strconv.FormatInt(trafficCfg.WaitingQueue, 10)
+	common.OptionMap[common.TrafficControlWaitingTimeoutMsOption] = strconv.FormatInt(trafficCfg.WaitingTimeoutMs, 10)
 	common.OptionMap["ModelRatio"] = ratio_setting.ModelRatio2JSONString()
 	common.OptionMap["ModelPrice"] = ratio_setting.ModelPrice2JSONString()
 	common.OptionMap["CacheRatio"] = ratio_setting.CacheRatio2JSONString()
@@ -192,6 +201,43 @@ func InitOptionMap() {
 
 	common.OptionMapRWMutex.Unlock()
 	loadOptionsFromDatabase()
+	migrateTrafficControlDefaults()
+}
+
+// migrateTrafficControlDefaults performs the one-time switch from the legacy
+// hybrid/240RPM/32Burst defaults to concurrency/240. It runs only when the
+// migration marker is absent and never rewrites admin-customized values; once
+// the marker exists, restarts, syncs and upgrades leave every value untouched.
+func migrateTrafficControlDefaults() {
+	if setting.ModelRequestRateLimitEnabled {
+		setting.ModelRequestRateLimitEnabled = false
+		_ = UpdateOption("ModelRequestRateLimitEnabled", "false")
+	}
+
+	common.OptionMapRWMutex.RLock()
+	marker := common.OptionMap[common.TrafficControlDefaultsMigratedOption]
+	mode := common.OptionMap[common.TrafficControlModeOption]
+	rpm := common.OptionMap[common.TrafficControlGlobalRPMOption]
+	burst := common.OptionMap[common.TrafficControlBurstOption]
+	maxActive := common.OptionMap[common.TrafficControlMaxActiveOption]
+	common.OptionMapRWMutex.RUnlock()
+	if marker == common.TrafficControlDefaultsMigratedValue {
+		return
+	}
+	legacyDefaults := (mode == string(common.TrafficControlModeHybrid) || mode == string(common.TrafficControlModeRPM) || maxActive == "240" || rpm == "240" || burst == "32" || maxActive == "120" || rpm == "120")
+	if legacyDefaults {
+		common.SysLog("traffic control migration: legacy/stale defaults detected, switching to concurrency/1000 (waiting_queue=0)")
+		if err := UpdateOption(common.TrafficControlModeOption, string(common.TrafficControlModeConcurrency)); err != nil {
+			common.SysLog("traffic control migration: failed to persist concurrency mode: " + err.Error())
+			return
+		}
+		_ = UpdateOption(common.TrafficControlMaxActiveOption, "1000")
+		_ = UpdateOption(common.TrafficControlGlobalRPMOption, "1000")
+		_ = UpdateOption(common.TrafficControlBurstOption, "128")
+	}
+	if err := UpdateOption(common.TrafficControlDefaultsMigratedOption, common.TrafficControlDefaultsMigratedValue); err != nil {
+		common.SysLog("traffic control migration: failed to persist migration marker: " + err.Error())
+	}
 }
 
 func loadOptionsFromDatabase() {
@@ -204,11 +250,38 @@ func loadOptionsFromDatabase() {
 	}()
 	passkeyOptionMutex.Lock()
 	defer passkeyOptionMutex.Unlock()
-	options, _ := AllOption()
+	options, err := AllOption()
+	if err != nil {
+		common.SysLog("failed to load options from database: " + err.Error())
+		return
+	}
+	newOptions := make(map[string]string, len(options))
+	for _, opt := range options {
+		newOptions[opt.Key] = opt.Value
+	}
+	common.OptionMapRWMutex.Lock()
+	if common.OptionMap == nil {
+		common.OptionMap = make(map[string]string)
+	}
+	for k, v := range newOptions {
+		common.OptionMap[k] = v
+	}
+	trafficSnapshot := common.SnapshotTrafficControlOptions(common.OptionMap)
+	common.OptionMapRWMutex.Unlock()
+
+	if err := common.ApplyTrafficControlFromOptions(trafficSnapshot); err != nil {
+		common.SysLog("failed to apply traffic control from full options snapshot: " + err.Error())
+	}
+
 	passkeyOptions := make(map[string]string)
 	for _, option := range options {
 		if IsPasskeyDomainOption(option.Key) {
 			passkeyOptions[option.Key] = option.Value
+		}
+		switch option.Key {
+		case common.TrafficControlEnabledOption, common.TrafficControlModeOption, common.TrafficControlGlobalRPMOption,
+			common.TrafficControlBurstOption, common.TrafficControlMaxActiveOption, common.TrafficControlWaitingQueueOption,
+			common.TrafficControlWaitingTimeoutMsOption, common.TrafficControlRevisionOption:
 			continue
 		}
 		err := updateOptionMap(option.Key, option.Value)
@@ -259,17 +332,126 @@ func UpdateOption(key string, value string) error {
 	}
 	// Save to database first
 	option := Option{
-		Key: key,
+		Key:   key,
+		Value: value,
 	}
-	// https://gorm.io/docs/update.html#Save-All-Fields
-	DB.FirstOrCreate(&option, Option{Key: key})
-	option.Value = value
-	// Save is a combination function.
-	// If save value does not contain primary key, it will execute Create,
-	// otherwise it will execute Update (with all fields).
-	DB.Save(&option)
+	if err := DB.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "key"}},
+		DoUpdates: clause.AssignmentColumns([]string{"value"}),
+	}).Create(&option).Error; err != nil {
+		return err
+	}
 	// Update OptionMap
 	return updateOptionMap(key, value)
+}
+
+var ErrTrafficControlConflict = common.ErrTrafficControlConflict
+
+// UpdateTrafficControlAuthoritative is the authoritative path for traffic control
+// configuration. It compares the expected revision, writes all options including
+// the bumped revision in one database transaction, and updates the in-memory
+// OptionMap and runtime atomically without an interleaving window.
+func UpdateTrafficControlAuthoritative(cfg common.TrafficControlConfig, expectedRevision *uint64) (common.TrafficControlMetrics, error) {
+	if err := common.ValidateTrafficControlConfig(cfg); err != nil {
+		return common.TrafficControlMetrics{}, err
+	}
+
+	var newRevision uint64
+	var values map[string]string
+	var isNoop bool
+
+	err := DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&Option{
+			Key:   common.TrafficControlRevisionOption,
+			Value: "0",
+		}).Error; err != nil {
+			return err
+		}
+		var revOption Option
+		if err := lockForUpdate(tx).Where("key = ?", common.TrafficControlRevisionOption).First(&revOption).Error; err != nil {
+			return err
+		}
+		var currentRevision uint64
+		if revOption.Value != "" {
+			if parsed, parseErr := strconv.ParseUint(strings.TrimSpace(revOption.Value), 10, 64); parseErr == nil {
+				currentRevision = parsed
+			}
+		}
+
+		var currentOptions []Option
+		if err := tx.Where("key IN ?", common.TrafficControlOptionKeys).Find(&currentOptions).Error; err != nil {
+			return err
+		}
+		currentMap := make(map[string]string, len(currentOptions))
+		for _, opt := range currentOptions {
+			currentMap[opt.Key] = opt.Value
+		}
+		currentCfg, _ := common.TrafficControlConfigFromOptions(currentMap)
+
+		if expectedRevision != nil {
+			if *expectedRevision != currentRevision {
+				return ErrTrafficControlConflict
+			}
+			if currentRevision > 0 && currentCfg == cfg {
+				// 同 revision 同内容幂等
+				isNoop = true
+				return nil
+			}
+			// 同 revision 异内容升级
+		} else {
+			if currentRevision > 0 && currentCfg == cfg {
+				// 同内容幂等
+				isNoop = true
+				return nil
+			}
+		}
+
+		newRevision = currentRevision + 1
+
+		values = map[string]string{
+			common.TrafficControlEnabledOption:          strconv.FormatBool(cfg.Enabled),
+			common.TrafficControlModeOption:             string(cfg.Mode),
+			common.TrafficControlGlobalRPMOption:        strconv.FormatInt(cfg.GlobalRPM, 10),
+			common.TrafficControlBurstOption:            strconv.FormatInt(cfg.Burst, 10),
+			common.TrafficControlMaxActiveOption:        strconv.FormatInt(cfg.MaxActiveRequests, 10),
+			common.TrafficControlWaitingQueueOption:     strconv.FormatInt(cfg.WaitingQueue, 10),
+			common.TrafficControlWaitingTimeoutMsOption: strconv.FormatInt(cfg.WaitingTimeoutMs, 10),
+			common.TrafficControlRevisionOption:         strconv.FormatUint(newRevision, 10),
+		}
+
+		for k, v := range values {
+			opt := Option{Key: k, Value: v}
+			if err := tx.Clauses(clause.OnConflict{
+				Columns:   []clause.Column{{Name: "key"}},
+				DoUpdates: clause.AssignmentColumns([]string{"value"}),
+			}).Create(&opt).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return common.GetTrafficControlMetrics(), err
+	}
+
+	if isNoop {
+		return common.GetTrafficControlMetrics(), nil
+	}
+
+	common.OptionMapRWMutex.Lock()
+	if common.OptionMap == nil {
+		common.OptionMap = make(map[string]string)
+	}
+	for k, v := range values {
+		common.OptionMap[k] = v
+	}
+	common.OptionMapRWMutex.Unlock()
+
+	if err := common.SetTrafficControlConfigWithRevision(cfg, newRevision); err != nil {
+		return common.GetTrafficControlMetrics(), err
+	}
+
+	return common.GetTrafficControlMetrics(), nil
 }
 
 // UpdateOptionsBulk persists multiple key/value pairs in a single database
@@ -314,12 +496,11 @@ func UpdateOptionsBulk(values map[string]string) error {
 
 	err := DB.Transaction(func(tx *gorm.DB) error {
 		for k, v := range values {
-			option := Option{Key: k}
-			if err := tx.FirstOrCreate(&option, Option{Key: k}).Error; err != nil {
-				return err
-			}
-			option.Value = v
-			if err := tx.Save(&option).Error; err != nil {
+			opt := Option{Key: k, Value: v}
+			if err := tx.Clauses(clause.OnConflict{
+				Columns:   []clause.Column{{Name: "key"}},
+				DoUpdates: clause.AssignmentColumns([]string{"value"}),
+			}).Create(&opt).Error; err != nil {
 				return err
 			}
 		}
@@ -327,6 +508,26 @@ func UpdateOptionsBulk(values map[string]string) error {
 	})
 	if err != nil {
 		return err
+	}
+	// Pre-apply traffic control keys into the OptionMap before dispatching the
+	// per-key updates. Every snapshot publish below then already sees the final
+	// combined config, so publish order cannot create invalid intermediate
+	// states and the first publish is the only state change.
+	trafficKeys := make([]string, 0, 8)
+	for k := range values {
+		switch k {
+		case common.TrafficControlEnabledOption, common.TrafficControlModeOption, common.TrafficControlGlobalRPMOption,
+			common.TrafficControlBurstOption, common.TrafficControlMaxActiveOption, common.TrafficControlWaitingQueueOption,
+			common.TrafficControlWaitingTimeoutMsOption:
+			trafficKeys = append(trafficKeys, k)
+		}
+	}
+	if len(trafficKeys) > 0 {
+		common.OptionMapRWMutex.Lock()
+		for _, k := range trafficKeys {
+			common.OptionMap[k] = values[k]
+		}
+		common.OptionMapRWMutex.Unlock()
 	}
 	for k, v := range values {
 		if err := updateOptionMap(k, v); err != nil {
@@ -349,6 +550,12 @@ func updateOptionMap(key string, value string) (err error) {
 	common.OptionMapRWMutex.Lock()
 	defer common.OptionMapRWMutex.Unlock()
 	common.OptionMap[key] = value
+	// Publish the complete traffic control config from the current OptionMap
+	// snapshot. Same-value snapshots are no-ops, so every option write reaches
+	// the runtime through one full-config path instead of per-field deltas.
+	if err := common.ApplyTrafficControlFromOptions(common.SnapshotTrafficControlOptions(common.OptionMap)); err != nil {
+		return err
+	}
 
 	// 检查是否是模型配置 - 使用更规范的方式处理
 	if handleConfigUpdate(key, value) {

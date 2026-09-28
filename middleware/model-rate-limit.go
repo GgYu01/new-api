@@ -175,7 +175,7 @@ func modelRequestSucceeded(c *gin.Context) bool {
 func ModelRequestRateLimit() func(c *gin.Context) {
 	return func(c *gin.Context) {
 		// 在每个请求时检查是否启用限流
-		if !setting.ModelRequestRateLimitEnabled {
+		if !setting.ModelRequestRateLimitEnabled || common.GetTrafficControlConfig().Mode == common.TrafficControlModeConcurrency {
 			c.Next()
 			return
 		}

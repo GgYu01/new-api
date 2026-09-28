@@ -1,10 +1,13 @@
 package relay
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
@@ -14,6 +17,8 @@ import (
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 
 	"github.com/gin-gonic/gin"
 )
@@ -25,7 +30,9 @@ func AlphaSearchHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError
 	case constant.ChannelTypeSub2API,
 		constant.ChannelTypeNewAPI,
 		constant.ChannelTypeCodex,
-		constant.ChannelTypeAdvancedCustom:
+		constant.ChannelTypeAdvancedCustom,
+		constant.ChannelTypeOpenAI,
+		constant.ChannelTypeCustom:
 	default:
 		// Allow retry onto another channel that may support this endpoint.
 		return types.NewError(
@@ -92,36 +99,121 @@ func AlphaSearchHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError
 		return newAPIError
 	}
 
-	if contentType := httpResp.Header.Get("Content-Type"); contentType != "" {
-		c.Writer.Header().Set("Content-Type", contentType)
-	}
-	c.Writer.WriteHeader(httpResp.StatusCode)
-	if _, err := io.Copy(c.Writer, httpResp.Body); err != nil {
+	const maxSearchRespBytes = 32 << 20 // 32 MiB
+	limited := io.LimitReader(httpResp.Body, int64(maxSearchRespBytes)+1)
+	respBytes, err := io.ReadAll(limited)
+	if err != nil {
 		return types.NewError(err, types.ErrorCodeDoRequestFailed, types.ErrOptionWithSkipRetry())
 	}
-
-	// Upstream alpha search returns no usage; bill one web_search_preview call.
-	if info.ResponsesUsageInfo == nil {
-		info.ResponsesUsageInfo = &relaycommon.ResponsesUsageInfo{
-			BuiltInTools: make(map[string]*relaycommon.BuildInToolInfo),
-		}
-	}
-	if info.ResponsesUsageInfo.BuiltInTools == nil {
-		info.ResponsesUsageInfo.BuiltInTools = make(map[string]*relaycommon.BuildInToolInfo)
-	}
-	info.ResponsesUsageInfo.BuiltInTools[dto.BuildInToolWebSearchPreview] = &relaycommon.BuildInToolInfo{
-		ToolName:  dto.BuildInToolWebSearchPreview,
-		CallCount: 1,
+	if len(respBytes) > maxSearchRespBytes {
+		return types.NewErrorWithStatusCode(
+			errors.New("alpha search response exceeded size limit (32MB)"),
+			types.ErrorCodeBadResponseBody,
+			http.StatusBadGateway,
+			types.ErrOptionWithSkipRetry(),
+		)
 	}
 
+	outputText, valErr := validateAlphaSearchResponseBody(respBytes)
+	if valErr != nil {
+		return valErr
+	}
+
+	trimmed := bytes.TrimSpace(respBytes)
+
+	// Update info.UpstreamModelName if upstream returned an explicit model (e.g. from fallback)
+	if upstreamModel := gjson.GetBytes(trimmed, "model").String(); strings.TrimSpace(upstreamModel) != "" {
+		info.UpstreamModelName = strings.TrimSpace(upstreamModel)
+	}
+
+	// Billing: check if upstream provided explicit token usage
 	usage := &dto.Usage{}
+	if usageNode := gjson.GetBytes(trimmed, "usage"); usageNode.IsObject() {
+		_ = common.Unmarshal([]byte(usageNode.Raw), usage)
+	}
+
+	// Tool billing: check if upstream specified search_call_count / tool_call_count
+	// Default to 1 (live search) unless explicitly 0 (e.g. pure conversation fallback)
+	var searchCallCount int64 = 1
+	if scNode := gjson.GetBytes(trimmed, "search_call_count"); scNode.Exists() {
+		searchCallCount = scNode.Int()
+	} else if tcNode := gjson.GetBytes(trimmed, "tool_call_count"); tcNode.Exists() {
+		searchCallCount = tcNode.Int()
+	}
+
+	if searchCallCount > 0 {
+		if info.ResponsesUsageInfo == nil {
+			info.ResponsesUsageInfo = &relaycommon.ResponsesUsageInfo{
+				BuiltInTools: make(map[string]*relaycommon.BuildInToolInfo),
+			}
+		}
+		if info.ResponsesUsageInfo.BuiltInTools == nil {
+			info.ResponsesUsageInfo.BuiltInTools = make(map[string]*relaycommon.BuildInToolInfo)
+		}
+		info.ResponsesUsageInfo.BuiltInTools[dto.BuildInToolWebSearchPreview] = &relaycommon.BuildInToolInfo{
+			ToolName:  dto.BuildInToolWebSearchPreview,
+			CallCount: int(searchCallCount),
+		}
+	} else if info.ResponsesUsageInfo != nil && info.ResponsesUsageInfo.BuiltInTools != nil {
+		delete(info.ResponsesUsageInfo.BuiltInTools, dto.BuildInToolWebSearchPreview)
+	}
+
+	if usage.TotalTokens == 0 && usage.PromptTokens == 0 && usage.CompletionTokens == 0 {
+		usage = service.ResponseText2Usage(c, outputText, info.UpstreamModelName, info.GetEstimatePromptTokens())
+	}
+
+	// Quota is settled authoritatively regardless of client-side write errors
 	service.PostTextConsumeQuota(c, info, usage, nil)
+
+	if contentType := httpResp.Header.Get("Content-Type"); contentType != "" {
+		c.Writer.Header().Set("Content-Type", contentType)
+	} else {
+		c.Writer.Header().Set("Content-Type", "application/json")
+	}
+	c.Writer.WriteHeader(httpResp.StatusCode)
+	if _, writeErr := c.Writer.Write(respBytes); writeErr != nil {
+		logger.LogWarn(c, fmt.Sprintf("alpha search client write error: %v", writeErr))
+	}
 	return nil
 }
 
+func validateAlphaSearchResponseBody(respBytes []byte) (string, *types.NewAPIError) {
+	trimmed := bytes.TrimSpace(respBytes)
+	if len(trimmed) < 2 || trimmed[0] != '{' || trimmed[len(trimmed)-1] != '}' || !json.Valid(trimmed) {
+		return "", types.NewErrorWithStatusCode(
+			errors.New("alpha search returned invalid non-JSON payload"),
+			types.ErrorCodeBadResponseBody,
+			http.StatusBadGateway,
+			types.ErrOptionWithSkipRetry(),
+		)
+	}
+	if errNode := gjson.GetBytes(trimmed, "error"); errNode.Exists() {
+		errMsg := "unknown upstream error"
+		if msg := errNode.Get("message").String(); msg != "" {
+			errMsg = msg
+		}
+		return "", types.NewErrorWithStatusCode(
+			fmt.Errorf("alpha search upstream error: %s", errMsg),
+			types.ErrorCodeBadResponseBody,
+			http.StatusBadGateway,
+			types.ErrOptionWithSkipRetry(),
+		)
+	}
+	outputNode := gjson.GetBytes(trimmed, "output")
+	if !outputNode.Exists() || outputNode.Type != gjson.String || strings.TrimSpace(outputNode.String()) == "" {
+		return "", types.NewErrorWithStatusCode(
+			errors.New("alpha search response missing required non-empty 'output' string"),
+			types.ErrorCodeBadResponseBody,
+			http.StatusBadGateway,
+			types.ErrOptionWithSkipRetry(),
+		)
+	}
+	return outputNode.String(), nil
+}
+
 // buildAlphaSearchRequestBody returns RawBody unchanged unless the model was
-// mapped, in which case only the "model" field is rewritten so unknown fields
-// are preserved.
+// mapped, in which case only the "model" field is rewritten using sjson so large
+// integers, formatting, and unknown fields are preserved without lossy round-tripping.
 func buildAlphaSearchRequestBody(rawBody []byte, originModel, upstreamModel string) ([]byte, error) {
 	if len(rawBody) == 0 {
 		return nil, errors.New("empty alpha search request body")
@@ -129,10 +221,5 @@ func buildAlphaSearchRequestBody(rawBody []byte, originModel, upstreamModel stri
 	if upstreamModel == "" || upstreamModel == originModel {
 		return rawBody, nil
 	}
-	var body map[string]any
-	if err := common.Unmarshal(rawBody, &body); err != nil {
-		return nil, err
-	}
-	body["model"] = upstreamModel
-	return common.Marshal(body)
+	return sjson.SetBytes(rawBody, "model", upstreamModel)
 }

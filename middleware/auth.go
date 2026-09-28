@@ -521,6 +521,22 @@ func SetupContextForToken(c *gin.Context, token *model.Token, parts ...string) e
 	} else {
 		c.Set("token_model_limit_enabled", false)
 	}
+	// A user may hold multiple independent subscriptions.  The API key is the
+	// billing boundary, so retain its normalized subscription type in request
+	// context and enforce it as an intersection with the user's active plans.
+	if subscriptionType, err := model.NormalizeTokenSubscriptionType(token.SubscriptionType); err != nil {
+		abortWithOpenAiMessage(c, http.StatusForbidden, err.Error(), types.ErrorCodeModelNotFound)
+		return err
+	} else if strings.TrimSpace(token.SubscriptionType) != "" {
+		common.SetContextKey(c, constant.ContextKeyTokenSubscriptionType, subscriptionType)
+	}
+	if token.ScopeExempt {
+		if !model.IsAdmin(token.UserId) {
+			abortWithOpenAiMessage(c, http.StatusForbidden, "scope_exempt is restricted to system credentials", types.ErrorCodeModelNotFound)
+			return fmt.Errorf("scope_exempt is restricted to system credentials")
+		}
+		common.SetContextKey(c, constant.ContextKeyTokenScopeExempt, true)
+	}
 	common.SetContextKey(c, constant.ContextKeyTokenGroup, token.Group)
 	common.SetContextKey(c, constant.ContextKeyTokenCrossGroupRetry, token.CrossGroupRetry)
 	if token.AutoGroups != "" {

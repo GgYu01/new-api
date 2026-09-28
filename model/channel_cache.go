@@ -216,6 +216,26 @@ func GetRandomSatisfiedChannel(
 	return nil, errors.New("channel not found")
 }
 
+func channelCanServeModel(channel *Channel, modelName string) bool {
+	if channel == nil {
+		return false
+	}
+	// codex-auto-review is explicitly owned by OpenAI. A stale ability on the
+	// native Codex channel must not silently route it through the Codex adaptor.
+	isAutoReview := isCodexAutoReviewModel(modelName)
+	return !(isAutoReview && channel.Type == constant.ChannelTypeCodex)
+}
+
+func isCodexAutoReviewModel(modelName string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(modelName))
+	return normalized == "codex-auto-review" || strings.HasPrefix(normalized, "codex-auto-review-")
+}
+
+// ChannelCanServeModel exposes the narrow provider guard to middleware and
+// retry paths without exposing channel-cache internals.
+func ChannelCanServeModel(channel *Channel, modelName string) bool {
+	return channelCanServeModel(channel, modelName)
+}
 func CacheGetChannel(id int) (*Channel, error) {
 	if !common.MemoryCacheEnabled {
 		return GetChannelById(id, true)

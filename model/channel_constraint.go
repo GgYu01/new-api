@@ -88,6 +88,9 @@ func candidatePassesKindFilters(ch *Channel, exists bool, modelName string, kind
 }
 
 func channelMatchesFilter(ch *Channel, modelName string, filter dto.ChannelFilter) bool {
+	if !channelCanServeModel(ch, modelName) {
+		return false
+	}
 	switch filter.Kind {
 	case dto.FilterRequestPath:
 		if filter.RequestPath == "" {

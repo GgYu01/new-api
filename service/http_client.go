@@ -77,22 +77,23 @@ func ValidateSSRFProtectedFetchURL(urlStr string) error {
 const maxTimeoutSeconds = int(math.MaxInt64 / int64(time.Second))
 
 func newRelayHTTPTransport() *http.Transport {
+	ladder := common.LoadTimeoutLadder()
 	var transport *http.Transport
 	if defaultTransport, ok := http.DefaultTransport.(*http.Transport); ok && defaultTransport != nil {
 		transport = defaultTransport.Clone()
 	} else {
-		dialer := &net.Dialer{
-			Timeout:   30 * time.Second,
-			KeepAlive: 30 * time.Second,
-		}
 		transport = &http.Transport{
 			Proxy:                 http.ProxyFromEnvironment,
-			DialContext:           dialer.DialContext,
 			ForceAttemptHTTP2:     true,
-			TLSHandshakeTimeout:   10 * time.Second,
 			ExpectContinueTimeout: time.Second,
 		}
 	}
+	dialer := &net.Dialer{
+		Timeout:   ladder.UpstreamConnectTimeout,
+		KeepAlive: ladder.TCPKeepaliveIdle,
+	}
+	transport.DialContext = dialer.DialContext
+	transport.TLSHandshakeTimeout = ladder.UpstreamTLSHandshakeTimeout
 	transport.MaxIdleConns = common.RelayMaxIdleConns
 	transport.MaxIdleConnsPerHost = common.RelayMaxIdleConnsPerHost
 	transport.IdleConnTimeout = time.Duration(common.RelayIdleConnTimeout) * time.Second
@@ -122,6 +123,13 @@ func newRelayHTTPTransport() *http.Transport {
 }
 
 func newRelayHTTPClient(transport http.RoundTripper) *http.Client {
+	// Timeout stays 0 unless RELAY_TIMEOUT is explicitly set. A non-zero
+	// http.Client.Timeout is an absolute wall-clock deadline covering the
+	// whole request (connect + headers + body) and would kill a 60m logical
+	// stream that is still making progress. Relay traffic is bounded by
+	// phase contexts (lifetime / precommit / first-event / idle) plus
+	// Transport Dial/TLS timeouts from common.LoadTimeoutLadder().
+	// RELAY_TIMEOUT is an operational override, default 0.
 	client := &http.Client{
 		Transport:     transport,
 		CheckRedirect: checkRedirect,

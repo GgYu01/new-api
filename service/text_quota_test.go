@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"net/http/httptest"
@@ -295,6 +296,77 @@ func runFixedPriceAccountingCases(t *testing.T, db, logDB *gorm.DB) {
 			}
 		})
 	}
+
+func TestCalculateTextQuotaSummaryBillsEstimateWhenUpstreamOmitsUsage(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+
+	relayInfo := &relaycommon.RelayInfo{
+		OriginModelName: "gpt-5.6-sol",
+		IsStream:        true,
+		PriceData: hosttypes.PriceData{
+			ModelRatio:      1,
+			CompletionRatio: 1,
+			GroupRatioInfo:  hosttypes.GroupRatioInfo{GroupRatio: 1},
+		},
+		StartTime: time.Now(),
+	}
+	relayInfo.SetEstimatePromptTokens(164487)
+
+	summary := calculateTextQuotaSummary(ctx, relayInfo, &dto.Usage{})
+
+	require.Equal(t, 164487, summary.PromptTokens)
+	require.Equal(t, 164487, summary.TotalTokens)
+	require.Greater(t, summary.Quota, 0, "empty upstream usage must settle estimated prompt tokens, not refund pre-consume")
+}
+
+func TestCalculateTextQuotaSummaryDoesNotBillEstimateWhenClientGone(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+
+	relayInfo := &relaycommon.RelayInfo{
+		OriginModelName: "gpt-5.6-sol",
+		IsStream:        true,
+		StreamStatus: &relaycommon.StreamStatus{
+			EndReason: relaycommon.StreamEndReasonClientGone,
+		},
+		PriceData: hosttypes.PriceData{
+			ModelRatio:      1,
+			CompletionRatio: 1,
+			GroupRatioInfo:  hosttypes.GroupRatioInfo{GroupRatio: 1},
+		},
+		StartTime: time.Now(),
+	}
+	relayInfo.SetEstimatePromptTokens(164487)
+
+	summary := calculateTextQuotaSummary(ctx, relayInfo, &dto.Usage{})
+
+	require.Equal(t, 0, summary.PromptTokens)
+	require.Equal(t, 0, summary.Quota)
+}
+
+func TestMissingBillingDispositionPreservesClientCancellation(t *testing.T) {
+	clientGone := &relaycommon.RelayInfo{
+		IsStream: true,
+		StreamStatus: &relaycommon.StreamStatus{
+			EndReason: relaycommon.StreamEndReasonClientGone,
+			EndError:  context.Canceled,
+		},
+	}
+	message, canceled := missingBillingDisposition(clientGone)
+	assert.True(t, canceled)
+	assert.Contains(t, message, "客户端已断开")
+	assert.NotContains(t, message, "上游超时")
+
+	upstreamMissing := &relaycommon.RelayInfo{
+		IsStream: true,
+		StreamStatus: &relaycommon.StreamStatus{
+			EndReason: relaycommon.StreamEndReasonScannerErr,
+		},
+	}
+	message, canceled = missingBillingDisposition(upstreamMissing)
+	assert.False(t, canceled)
+	assert.Contains(t, message, "上游没有返回计费信息")
 }
 
 func TestCalculateTextQuotaSummaryUnifiedForClaudeSemantic(t *testing.T) {

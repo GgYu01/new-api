@@ -6,7 +6,9 @@ import (
 	"net/http"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/logger"
+	"github.com/QuantumNous/new-api/relay/lifecycle"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
 
@@ -42,6 +44,29 @@ func requestContextDone(c *gin.Context) bool {
 	return c != nil && c.Request != nil && c.Request.Context().Err() != nil
 }
 
+func markHeadersCommitted(c *gin.Context) {
+	if c == nil {
+		return
+	}
+	common.SetContextKey(c, constant.ContextKeyHeadersCommitted, true)
+	if !common.GetContextKeyBool(c, constant.ContextKeySemanticCommitted) {
+		common.SetContextKey(c, constant.ContextKeyKeepaliveOnly, true)
+	}
+}
+
+func MarkSemanticCommitted(c *gin.Context) {
+	if c == nil {
+		return
+	}
+	common.SetContextKey(c, constant.ContextKeyHeadersCommitted, true)
+	common.SetContextKey(c, constant.ContextKeyKeepaliveOnly, false)
+	common.SetContextKey(c, constant.ContextKeySemanticCommitted, true)
+}
+
+func SemanticCommitted(c *gin.Context) bool {
+	return common.GetContextKeyBool(c, constant.ContextKeySemanticCommitted)
+}
+
 func SetEventStreamHeaders(c *gin.Context) {
 	// 检查是否已经设置过头部
 	if _, exists := c.Get("event_stream_headers_set"); exists {
@@ -67,6 +92,7 @@ func ClaudeData(c *gin.Context, resp dto.ClaudeResponse) error {
 	if err != nil {
 		common.SysError("error marshalling stream response: " + err.Error())
 	} else {
+		MarkSemanticCommitted(c)
 		c.Render(-1, common.CustomEvent{Data: fmt.Sprintf("event: %s\n", resp.Type)})
 		c.Render(-1, common.CustomEvent{Data: "data: " + string(jsonData)})
 	}
@@ -79,6 +105,7 @@ func ClaudeChunkData(c *gin.Context, resp dto.ClaudeResponse, data string) {
 		return
 	}
 
+	MarkSemanticCommitted(c)
 	c.Render(-1, common.CustomEvent{Data: fmt.Sprintf("event: %s\n", resp.Type)})
 	c.Render(-1, common.CustomEvent{Data: fmt.Sprintf("data: %s\n", data)})
 	_ = FlushWriter(c)
@@ -89,6 +116,7 @@ func ResponseChunkData(c *gin.Context, resp dto.ResponsesStreamResponse, data st
 		return fmt.Errorf("request context done: %w", c.Request.Context().Err())
 	}
 
+	MarkSemanticCommitted(c)
 	c.Render(-1, common.CustomEvent{Data: fmt.Sprintf("event: %s\n", resp.Type)})
 	c.Render(-1, common.CustomEvent{Data: fmt.Sprintf("data: %s", data)})
 	return FlushWriter(c)
@@ -103,6 +131,11 @@ func StringData(c *gin.Context, str string) error {
 		return fmt.Errorf("request context done: %w", c.Request.Context().Err())
 	}
 
+	payload := []byte("data: " + str)
+	lifecycle.ClassifyDownstreamPayload(c, payload)
+	if lifecycle.ShouldHoldDownstream(c, payload) {
+		return nil
+	}
 	c.Render(-1, common.CustomEvent{Data: "data: " + str})
 	return FlushWriter(c)
 }
@@ -116,6 +149,7 @@ func PingData(c *gin.Context) error {
 		return fmt.Errorf("request context done: %w", c.Request.Context().Err())
 	}
 
+	markHeadersCommitted(c)
 	if _, err := c.Writer.Write([]byte(": PING\n\n")); err != nil {
 		return fmt.Errorf("write ping data failed: %w", err)
 	}

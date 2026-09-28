@@ -387,6 +387,11 @@ export type OperationsSettings = {
   'perf_metrics_setting.flush_interval': number
   'perf_metrics_setting.bucket_time': 'hour' | 'minute' | '5min'
   'perf_metrics_setting.retention_days': number
+  TrafficControlEnabled: boolean
+  TrafficControlMode: 'off' | 'rpm' | 'concurrency' | 'hybrid'
+  TrafficControlGlobalRPM: number
+  TrafficControlBurst: number
+  TrafficControlMaxActiveRequests: number
 }
 
 export type SecuritySettings = {

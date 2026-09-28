@@ -389,6 +389,9 @@ func migrateDB() error {
 			return err
 		}
 	}
+	if err := BackfillSubscriptionTypes(); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -521,8 +524,10 @@ func ensureSubscriptionPlanTableSQLite() error {
 ` + "`max_purchase_per_user`" + ` integer DEFAULT 0,
 ` + "`upgrade_group`" + ` varchar(64) DEFAULT '',
 ` + "`downgrade_group`" + ` varchar(64) DEFAULT '',
-` + "`total_amount`" + ` bigint NOT NULL DEFAULT 0,
-` + "`quota_reset_period`" + ` varchar(16) DEFAULT 'never',
+	` + "`total_amount`" + ` bigint NOT NULL DEFAULT 0,
+	` + "`subscription_type`" + ` varchar(32) NOT NULL DEFAULT 'gptopenaicodex',
+	` + "`owner_user_id`" + ` bigint DEFAULT 0,
+	` + "`quota_reset_period`" + ` varchar(16) DEFAULT 'never',
 ` + "`quota_reset_custom_seconds`" + ` bigint DEFAULT 0,
 ` + "`created_at`" + ` bigint,
 ` + "`updated_at`" + ` bigint,
@@ -559,6 +564,8 @@ PRIMARY KEY (` + "`id`" + `)
 		{Name: "upgrade_group", DDL: "`upgrade_group` varchar(64) DEFAULT ''"},
 		{Name: "downgrade_group", DDL: "`downgrade_group` varchar(64) DEFAULT ''"},
 		{Name: "total_amount", DDL: "`total_amount` bigint NOT NULL DEFAULT 0"},
+		{Name: "subscription_type", DDL: "`subscription_type` varchar(32) NOT NULL DEFAULT 'gptopenaicodex'"},
+		{Name: "owner_user_id", DDL: "`owner_user_id` bigint DEFAULT 0"},
 		{Name: "quota_reset_period", DDL: "`quota_reset_period` varchar(16) DEFAULT 'never'"},
 		{Name: "quota_reset_custom_seconds", DDL: "`quota_reset_custom_seconds` bigint DEFAULT 0"},
 		{Name: "created_at", DDL: "`created_at` bigint"},

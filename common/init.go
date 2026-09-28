@@ -32,8 +32,14 @@ func printHelp() {
 func InitEnv() {
 	flag.Parse()
 
+	// 捕获编译期版本，防止环境变量覆盖导致丢失原始编译信息
+	if CompiledVersion == "" && Version != "" && Version != "v0.0.0" {
+		CompiledVersion = Version
+	}
+
 	envVersion := os.Getenv("VERSION")
 	if envVersion != "" {
+		RuntimeVersionOverride = envVersion
 		Version = envVersion
 	}
 
@@ -109,7 +115,7 @@ func InitEnv() {
 	// Initialize variables with GetEnvOrDefault
 	SyncFrequency = GetEnvOrDefault("SYNC_FREQUENCY", 60)
 	BatchUpdateInterval = GetEnvOrDefault("BATCH_UPDATE_INTERVAL", 5)
-	RelayTimeout = GetEnvOrDefault("RELAY_TIMEOUT", 0)
+	RelayTimeout = GetEnvOrDefault("RELAY_TIMEOUT", 0) // operational override; default 0 disables http.Client.Timeout
 	RelayIdleConnTimeout = GetEnvOrDefault("RELAY_IDLE_CONN_TIMEOUT", 90)
 	RelayResponseHeaderTimeout = GetEnvOrDefault("RELAY_RESPONSE_HEADER_TIMEOUT", 1800)
 	RelayMaxIdleConns = GetEnvOrDefault("RELAY_MAX_IDLE_CONNS", 500)
@@ -180,10 +186,30 @@ func initConstantEnv() {
 	constant.DifyDebug = GetEnvOrDefaultBool("DIFY_DEBUG", true)
 	constant.MaxFileDownloadMB = GetEnvOrDefault("MAX_FILE_DOWNLOAD_MB", 64)
 	constant.StreamScannerMaxBufferMB = GetEnvOrDefault("STREAM_SCANNER_MAX_BUFFER_MB", 128)
-	// MaxRequestBodyMB 请求体最大大小（解压后），用于防止超大请求/zip bomb导致内存暴涨
+	// MaxRequestBodyMB limits the decompressed request body to prevent zip bombs.
 	constant.MaxRequestBodyMB = GetEnvOrDefault("MAX_REQUEST_BODY_MB", 128)
+	largeBodyThresholdMB := GetEnvOrDefault("RELAY_LARGE_BODY_THRESHOLD_MB", 8)
+	if largeBodyThresholdMB <= 0 {
+		SysError("RELAY_LARGE_BODY_THRESHOLD_MB must be positive, using default value: 8")
+		largeBodyThresholdMB = 8
+	}
+	largeBodyMaxInFlight := GetEnvOrDefault("RELAY_LARGE_BODY_MAX_INFLIGHT", defaultLargeBodyMaxInFlight)
+	if largeBodyMaxInFlight <= 0 {
+		SysError("RELAY_LARGE_BODY_MAX_INFLIGHT must be positive, using default value: 16")
+		largeBodyMaxInFlight = defaultLargeBodyMaxInFlight
+	}
+	largeBodyWaitSeconds := GetEnvOrDefault("RELAY_LARGE_BODY_WAIT_SECONDS", int(defaultLargeBodyWaitTimeout/time.Second))
+	if largeBodyWaitSeconds <= 0 {
+		SysError("RELAY_LARGE_BODY_WAIT_SECONDS must be positive, using default value: 30")
+		largeBodyWaitSeconds = int(defaultLargeBodyWaitTimeout / time.Second)
+	}
+	ConfigureLargeBodyAdmission(LargeBodyAdmissionConfig{
+		ThresholdBytes: int64(largeBodyThresholdMB) << 20,
+		MaxInFlight:    largeBodyMaxInFlight,
+		WaitTimeout:    time.Duration(largeBodyWaitSeconds) * time.Second,
+	})
 	constant.AnonymousRequestBodyLimitKB = GetEnvOrDefault("ANONYMOUS_REQUEST_BODY_LIMIT_KB", 512)
-	// ForceStreamOption 覆盖请求参数，强制返回usage信息
+	// ForceStreamOption overrides request options to require usage metadata.
 	constant.ForceStreamOption = GetEnvOrDefaultBool("FORCE_STREAM_OPTION", true)
 	constant.CountToken = GetEnvOrDefaultBool("CountToken", true)
 	constant.GetMediaToken = GetEnvOrDefaultBool("GET_MEDIA_TOKEN", true)
@@ -193,13 +219,13 @@ func initConstantEnv() {
 	constant.AzureDefaultAPIVersion = GetEnvOrDefaultString("AZURE_DEFAULT_API_VERSION", "2025-04-01-preview")
 	constant.NotifyLimitCount = GetEnvOrDefault("NOTIFY_LIMIT_COUNT", 2)
 	constant.NotificationLimitDurationMinute = GetEnvOrDefault("NOTIFICATION_LIMIT_DURATION_MINUTE", 10)
-	// GenerateDefaultToken 是否生成初始令牌，默认关闭。
+	// GenerateDefaultToken controls initial token generation and defaults off.
 	constant.GenerateDefaultToken = GetEnvOrDefaultBool("GENERATE_DEFAULT_TOKEN", false)
-	// 是否启用错误日志
+	// EnableErrorLog controls error logging.
 	constant.ErrorLogEnabled = GetEnvOrDefaultBool("ERROR_LOG_ENABLED", false)
-	// 任务轮询时查询的最大数量
+	// TaskPollMaxCount bounds each task-poll query.
 	constant.TaskQueryLimit = GetEnvOrDefault("TASK_QUERY_LIMIT", 1000)
-	// 异步任务超时时间（分钟），超过此时间未完成的任务将被标记为失败并退款。0 表示禁用。
+	// TaskTimeoutMinutes fails and refunds stale asynchronous tasks; zero disables it.
 	constant.TaskTimeoutMinutes = GetEnvOrDefault("TASK_TIMEOUT_MINUTES", 1440)
 	// Consecutive unrecognized/transient poll failures before the task is failed and refunded.
 	constant.TaskPollMaxFailures = GetEnvOrDefault("TASK_POLL_MAX_FAILURES", 20)

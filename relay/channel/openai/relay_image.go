@@ -2,6 +2,7 @@ package openai
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"github.com/QuantumNous/new-api/logger"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relay/helper"
+	"github.com/QuantumNous/new-api/relay/imagebridge"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
@@ -26,13 +28,28 @@ import (
 func OpenaiImageHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*dto.Usage, *types.NewAPIError) {
 	defer service.CloseResponseBodyGracefully(resp)
 
-	responseBody, err := io.ReadAll(resp.Body)
+	const maxStoredImageResponseBytes = int64(256 << 20)
+	responseStorage, err := common.CreateBodyStorageFromReader(resp.Body, resp.ContentLength, maxStoredImageResponseBytes)
 	if err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeReadResponseBodyFailed, http.StatusInternalServerError)
 	}
+	defer responseStorage.Close()
+	responseReader, err := responseStorage.NewReader()
+	if err != nil {
+		return nil, types.NewOpenAIError(err, types.ErrorCodeReadResponseBodyFailed, http.StatusInternalServerError)
+	}
+	responseView, err := imagebridge.ParseImageResponse(responseReader)
+	_ = responseReader.Close()
+	if err != nil {
+		return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
+	}
+	responseMetadata, err := responseView.MetadataJSON()
+	if err != nil {
+		return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
+	}
 
 	var usageResp dto.SimpleResponse
-	err = common.Unmarshal(responseBody, &usageResp)
+	err = common.Unmarshal(responseMetadata, &usageResp)
 	if err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
 	}
@@ -41,13 +58,25 @@ func OpenaiImageHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.
 		return nil, types.WithOpenAIError(*oaiError, resp.StatusCode)
 	}
 
-	info.UpdateImageCount(openaiImageResponseCount(responseBody))
+	info.UpdateImageCount(int64(responseView.DataCount()))
 
-	// 写入新的 response body
-	service.IOCopyBytesGracefully(c, resp, responseBody)
+	intent, isImageBridge := imagebridge.FromContext(c)
+	if isImageBridge && intent.Envelope != imagebridge.EnvelopeImages && !responseView.HasImageData() {
+		return nil, types.NewOpenAIError(imagebridge.ErrNoImageData, types.ErrorCodeBadResponseBody, http.StatusBadGateway)
+	}
+	if err := writeStoredImageResponse(c, resp, info, intent, isImageBridge, responseStorage, responseView); err != nil {
+		if errors.Is(err, imagebridge.ErrNoImageData) {
+			return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusBadGateway)
+		}
+		if info.StreamStatus == nil {
+			info.StreamStatus = relaycommon.NewStreamStatus()
+		}
+		info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonClientGone, err)
+		logger.LogInfo(c, fmt.Sprintf("image response downstream disconnected: %v", err))
+	}
 
 	normalizeOpenAIUsage(&usageResp.Usage)
-	applyUsagePostProcessing(info, &usageResp.Usage, responseBody)
+	applyUsagePostProcessing(info, &usageResp.Usage, responseMetadata)
 	return &usageResp.Usage, nil
 }
 
@@ -88,6 +117,50 @@ func openaiImageResponseCount(responseBody []byte) int64 {
 func openaiImageDataHasField(item gjson.Result, field string) bool {
 	value := item.Get(field)
 	return value.Type == gjson.String && value.Raw != `""`
+}
+
+func writeStoredImageResponse(
+	c *gin.Context,
+	resp *http.Response,
+	info *relaycommon.RelayInfo,
+	intent *imagebridge.Intent,
+	isImageBridge bool,
+	storage common.BodyStorage,
+	view *imagebridge.ImageResponseView,
+) error {
+	for key, values := range resp.Header {
+		if (isImageBridge && strings.EqualFold(key, "Content-Type")) || !service.ShouldCopyUpstreamHeader(c, key, values) || len(values) == 0 {
+			continue
+		}
+		c.Writer.Header().Set(key, values[0])
+	}
+	if isImageBridge {
+		c.Writer.Header().Del("Content-Length")
+		if intent.Stream && (intent.Envelope == imagebridge.EnvelopeResponses || intent.Envelope == imagebridge.EnvelopeChat) {
+			c.Writer.Header().Set("Content-Type", "text/event-stream")
+			c.Writer.Header().Set("Cache-Control", "no-cache")
+			c.Writer.Header().Set("X-Accel-Buffering", "no")
+		} else {
+			c.Writer.Header().Set("Content-Type", "application/json")
+		}
+	} else {
+		c.Writer.Header().Set("Content-Length", strconv.FormatInt(storage.Size(), 10))
+	}
+	c.Status(resp.StatusCode)
+	info.SetFirstResponseTime()
+	var err error
+	if isImageBridge {
+		err = imagebridge.WriteEnvelopeStorage(c.Writer, *intent, storage, imagebridge.NewIDs(info.RequestId), view)
+	} else {
+		reader, openErr := storage.NewReader()
+		if openErr != nil {
+			return openErr
+		}
+		_, err = io.CopyBuffer(c.Writer, reader, make([]byte, 32<<10))
+		_ = reader.Close()
+	}
+	c.Writer.Flush()
+	return err
 }
 
 // normalizeOpenAIUsage maps the OpenAI Images usage shape (input_tokens /

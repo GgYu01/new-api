@@ -39,6 +39,9 @@ export const subscriptionPlanSchema = z.object({
   allow_wallet_overflow: z.boolean().optional().default(true),
   max_purchase_per_user: z.number(),
   total_amount: z.number(),
+  subscription_type: z
+    .enum(['gptopenaicodex', 'grok'])
+    .default('gptopenaicodex'),
   upgrade_group: z.string().optional(),
   downgrade_group: z.string().optional(),
   stripe_price_id: z.string().optional(),
@@ -66,6 +69,9 @@ export const userSubscriptionSchema = z.object({
   end_time: z.number(),
   amount_total: z.number(),
   amount_used: z.number(),
+  subscription_type: z
+    .enum(['gptopenaicodex', 'grok'])
+    .default('gptopenaicodex'),
   next_reset_time: z.number().optional(),
 })
 

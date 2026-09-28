@@ -444,7 +444,7 @@ export function ApiKeysMutateDrawer({
                     <FormMessage />
                   </FormItem>
                 )}
-              />
+                />
 
               {selectedGroup === 'auto' && (
                 <FormField

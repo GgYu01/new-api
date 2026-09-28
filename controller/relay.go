@@ -22,6 +22,9 @@ import (
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relay/helper"
+	"github.com/QuantumNous/new-api/relay/imagebridge"
+	"github.com/QuantumNous/new-api/relay/lifecycle"
+	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
@@ -65,6 +68,36 @@ func geminiRelayHandler(c *gin.Context, info *relaycommon.RelayInfo) *types.NewA
 	return err
 }
 
+func requestBodyStorageErrorStatus(c *gin.Context, err error) (int, bool) {
+	if common.IsRequestBodyStalledError(err) {
+		// Half-open client upload: the body never completed, so this request
+		// cannot be retried upstream. Report the neutral stall code instead of
+		// a generic 400 so callers can tell it apart from malformed payloads.
+		if c != nil {
+			c.Header("Connection", "close")
+		}
+		return http.StatusRequestTimeout, true
+	}
+	if common.IsRequestBodyTruncatedError(err) {
+		if c != nil {
+			c.Header("Connection", "close")
+		}
+		return http.StatusBadRequest, true
+	}
+	if common.IsRequestBodyTooLargeError(err) || errors.Is(err, common.ErrRequestBodyTooLarge) {
+		return http.StatusRequestEntityTooLarge, true
+	}
+	if errors.Is(err, common.ErrDiskCacheCapacityExhausted) {
+		c.Header("Retry-After", "5")
+		return http.StatusServiceUnavailable, true
+	}
+	if errors.Is(err, common.ErrLargeBodyAdmissionTimeout) {
+		c.Header("Retry-After", "5")
+		return http.StatusServiceUnavailable, true
+	}
+	return 0, false
+}
+
 func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 
 	requestId := c.GetString(common.RequestIdKey)
@@ -75,6 +108,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		newAPIError *types.NewAPIError
 		ws          *websocket.Conn
 	)
+	bridgeIntent, isImageBridge := imagebridge.FromContext(c)
 
 	if relayFormat == types.RelayFormatOpenAIRealtime {
 		var err error
@@ -91,6 +125,16 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			service.RecordRequestPolicyTermination(c, newAPIError)
 			logger.LogError(c, fmt.Sprintf("relay error: %s", common.LocalLogPreview(newAPIError.Error())))
 			newAPIError.SetMessage(common.MessageWithRequestId(newAPIError.Error(), requestId))
+			if isImageBridge && bridgeIntent.Stream && c.Writer.Written() {
+				if err := imagebridge.WriteFailure(c.Writer, *bridgeIntent, imagebridge.NewIDs(requestId), newAPIError.Error()); err != nil {
+					logger.LogInfo(c, fmt.Sprintf("image bridge failure SSE downstream disconnected: %v", err))
+				}
+				c.Writer.Flush()
+				return
+			}
+			if newAPIError.StatusCode == http.StatusRequestTimeout {
+				c.Header("Connection", "close")
+			}
 			switch relayFormat {
 			case types.RelayFormatOpenAIRealtime:
 				helper.WssError(c, ws, newAPIError.ToOpenAIError())
@@ -104,24 +148,50 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 					"error": newAPIError.ToOpenAIError(),
 				})
 			}
+			if newAPIError.StatusCode == http.StatusRequestTimeout && c.Writer != nil {
+				c.Writer.Flush()
+			}
 		}
 	}()
 
-	request, err := helper.GetAndValidateRequest(c, relayFormat)
-	if err != nil {
-		// Map "request body too large" to 413 so clients can handle it correctly
-		if common.IsRequestBodyTooLargeError(err) || errors.Is(err, common.ErrRequestBodyTooLarge) {
-			newAPIError = types.NewErrorWithStatusCode(err, types.ErrorCodeReadRequestBodyFailed, http.StatusRequestEntityTooLarge, types.ErrOptionWithSkipRetry())
-		} else {
-			newAPIError = types.NewError(err, types.ErrorCodeInvalidRequest, types.ErrOptionWithStatusCode(http.StatusBadRequest), types.ErrOptionWithSkipRetry())
+	var request dto.Request
+	if isImageBridge {
+		bridgeRequest := bridgeIntent.Request
+		upstreamStream := false
+		bridgeRequest.Stream = &upstreamStream
+		if strings.TrimSpace(bridgeRequest.Prompt) == "" {
+			newAPIError = types.NewError(fmt.Errorf("image prompt is empty"), types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
+			return
 		}
-		return
+		request = &bridgeRequest
+		relayFormat = types.RelayFormatOpenAIImage
+	} else {
+		var err error
+		request, err = helper.GetAndValidateRequest(c, relayFormat)
+		if err != nil {
+			if status, handled := requestBodyStorageErrorStatus(c, err); handled {
+				newAPIError = types.NewErrorWithStatusCode(err, types.ErrorCodeReadRequestBodyFailed, status, types.ErrOptionWithSkipRetry())
+			} else {
+				newAPIError = types.NewError(err, types.ErrorCodeInvalidRequest, types.ErrOptionWithStatusCode(http.StatusBadRequest), types.ErrOptionWithSkipRetry())
+			}
+			return
+		}
 	}
 
 	relayInfo, err := relaycommon.GenRelayInfo(c, relayFormat, request, ws)
 	if err != nil {
 		newAPIError = types.NewError(err, types.ErrorCodeGenRelayInfoFailed)
 		return
+	}
+	if isImageBridge {
+		if bridgeIntent.Mode == imagebridge.ModeEdit {
+			relayInfo.RelayMode = relayconstant.RelayModeImagesEdits
+		} else {
+			relayInfo.RelayMode = relayconstant.RelayModeImagesGenerations
+		}
+		relayInfo.RequestURLPath = bridgeIntent.UpstreamPath()
+		relayInfo.IsStream = false
+		c.Set(string(constant.ContextKeyIsStream), bridgeIntent.Stream)
 	}
 
 	defer func() {
@@ -152,6 +222,9 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		RequestPath: c.Request.URL.Path,
 		Retry:       common.GetPointer(0),
 	}
+	if isImageBridge {
+		retryParam.RequestPath = bridgeIntent.UpstreamPath()
+	}
 	relayInfo.RetryIndex = 0
 	relayInfo.LastError = nil
 
@@ -172,14 +245,22 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			break
 		}
 
+		if c.Request != nil && c.Request.Context().Err() != nil {
+			newAPIError = types.NewErrorWithStatusCode(c.Request.Context().Err(), types.ErrorCodeInvalidRequest, http.StatusRequestTimeout, types.ErrOptionWithSkipRetry())
+			break
+		}
+
 		bodyStorage, bodyErr := common.GetBodyStorage(c)
 		if bodyErr != nil {
-			// Ensure consistent 413 for oversized bodies even when error occurs later (e.g., retry path)
-			if common.IsRequestBodyTooLargeError(bodyErr) || errors.Is(bodyErr, common.ErrRequestBodyTooLarge) {
-				newAPIError = types.NewErrorWithStatusCode(bodyErr, types.ErrorCodeReadRequestBodyFailed, http.StatusRequestEntityTooLarge, types.ErrOptionWithSkipRetry())
-			} else {
-				newAPIError = types.NewErrorWithStatusCode(bodyErr, types.ErrorCodeReadRequestBodyFailed, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
+			status := http.StatusBadRequest
+			if mapped, handled := requestBodyStorageErrorStatus(c, bodyErr); handled {
+				status = mapped
 			}
+			newAPIError = types.NewErrorWithStatusCode(bodyErr, types.ErrorCodeReadRequestBodyFailed, status, types.ErrOptionWithSkipRetry())
+			break
+		}
+		if _, seekErr := bodyStorage.Seek(0, io.SeekStart); seekErr != nil {
+			newAPIError = types.NewErrorWithStatusCode(seekErr, types.ErrorCodeReadRequestBodyFailed, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
 			break
 		}
 		c.Request.Body = io.NopCloser(bodyStorage)
@@ -255,7 +336,7 @@ func CountClaudeTokens(c *gin.Context) {
 var upgrader = websocket.Upgrader{
 	Subprotocols: []string{"realtime", "responses"}, // WS 握手支持的协议，如果有使用 Sec-WebSocket-Protocol，则必须在此声明对应的 Protocol
 	CheckOrigin: func(r *http.Request) bool {
-		return true // 允许跨域
+		return true // Allow the established cross-origin relay behavior.
 	},
 }
 
@@ -275,6 +356,23 @@ func getChannel(c *gin.Context, info *relaycommon.RelayInfo, retryParam *service
 		service.RequestPolicy(c).BeginAttempt(channel, info.UsingGroup)
 		return channel, nil
 	}
+
+	if service.ShouldSkipRetryAfterChannelAffinityFailure(c) {
+		chID, _, active := service.GetUsedChannelAffinity(c)
+		if active && chID > 0 {
+			preferred, err := model.CacheGetChannel(chID)
+			if err == nil && preferred != nil && preferred.Status == common.ChannelStatusEnabled {
+				info.PriceData.GroupRatioInfo = helper.HandleGroupRatio(c, info)
+				newAPIError := middleware.SetupContextForSelectedChannel(c, preferred, info.OriginModelName)
+				if newAPIError != nil {
+					return nil, newAPIError
+				}
+				return preferred, nil
+			}
+			return nil, types.NewError(fmt.Errorf("pinned affinity channel #%d is no longer available", chID), types.ErrorCodeGetChannelFailed, types.ErrOptionWithSkipRetry())
+		}
+	}
+
 	channel, selectGroup, err := service.CacheGetRandomSatisfiedChannel(retryParam)
 	if err != nil {
 		return nil, types.NewError(fmt.Errorf("获取分组 %s 下模型 %s 的可用渠道失败（retry）: %s", selectGroup, info.OriginModelName, err.Error()), types.ErrorCodeGetChannelFailed, types.ErrOptionWithSkipRetry())
@@ -534,11 +632,11 @@ func executeTaskSubmissionWith(
 		bodyStorage, bodyErr := common.GetBodyStorage(c)
 		if bodyErr != nil {
 			stage = "read_body"
-			if common.IsRequestBodyTooLargeError(bodyErr) || errors.Is(bodyErr, common.ErrRequestBodyTooLarge) {
-				taskErr = service.TaskErrorWrapperLocal(bodyErr, "read_request_body_failed", http.StatusRequestEntityTooLarge)
-			} else {
-				taskErr = service.TaskErrorWrapperLocal(bodyErr, "read_request_body_failed", http.StatusBadRequest)
+			status := http.StatusBadRequest
+			if mapped, handled := requestBodyStorageErrorStatus(c, bodyErr); handled {
+				status = mapped
 			}
+			taskErr = service.TaskErrorWrapperLocal(bodyErr, "read_request_body_failed", status)
 			break
 		}
 		c.Request.Body = io.NopCloser(bodyStorage)
@@ -769,7 +867,8 @@ func respondTaskSubmissionError(c *gin.Context, taskErr *taskdto.TaskError) {
 	respondTaskError(c, taskErr)
 }
 
-// respondTaskError 统一输出 Task 错误响应（含 429 限流提示改写）
+// respondTaskError writes the normalized task error response, including the
+// existing 429 message adjustment.
 func respondTaskError(c *gin.Context, taskErr *taskdto.TaskError) {
 	if taskErr.StatusCode == http.StatusTooManyRequests {
 		taskErr.Message = "当前分组上游负载已饱和，请稍后再试"

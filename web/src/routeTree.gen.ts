@@ -32,7 +32,9 @@ import { Route as AboutIndexRouteImport } from './routes/about/index'
 import { Route as OauthProviderRouteImport } from './routes/oauth/$provider'
 import { Route as PricingIndexRouteImport } from './routes/pricing/index'
 import { Route as RankingsIndexRouteImport } from './routes/rankings/index'
+import { Route as RechargeIndexRouteImport } from './routes/recharge/index'
 import { Route as SetupIndexRouteImport } from './routes/setup/index'
+import { Route as TopupIndexRouteImport } from './routes/topup/index'
 import { Route as authUserResetRouteImport } from './routes/(auth)/user/reset'
 import { Route as AuthenticatedChannelsIndexRouteImport } from './routes/_authenticated/channels/index'
 import { Route as AuthenticatedChatChatIdRouteImport } from './routes/_authenticated/chat/$chatId'
@@ -187,9 +189,19 @@ const RankingsIndexRoute = RankingsIndexRouteImport.update({
   path: '/rankings/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const RechargeIndexRoute = RechargeIndexRouteImport.update({
+  id: '/recharge/',
+  path: '/recharge/',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const SetupIndexRoute = SetupIndexRouteImport.update({
   id: '/setup/',
   path: '/setup/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const TopupIndexRoute = TopupIndexRouteImport.update({
+  id: '/topup/',
+  path: '/topup/',
   getParentRoute: () => rootRouteImport,
 } as any)
 const authUserResetRoute = authUserResetRouteImport.update({
@@ -444,7 +456,9 @@ export interface FileRoutesByFullPath {
   '/about/': typeof AboutIndexRoute
   '/pricing/': typeof PricingIndexRoute
   '/rankings/': typeof RankingsIndexRoute
+  '/recharge/': typeof RechargeIndexRoute
   '/setup/': typeof SetupIndexRoute
+  '/topup/': typeof TopupIndexRoute
   '/user/reset': typeof authUserResetRoute
   '/chat/$chatId': typeof AuthenticatedChatChatIdRoute
   '/dashboard/$section': typeof AuthenticatedDashboardSectionRoute
@@ -506,7 +520,9 @@ export interface FileRoutesByTo {
   '/about': typeof AboutIndexRoute
   '/pricing': typeof PricingIndexRoute
   '/rankings': typeof RankingsIndexRoute
+  '/recharge': typeof RechargeIndexRoute
   '/setup': typeof SetupIndexRoute
+  '/topup': typeof TopupIndexRoute
   '/user/reset': typeof authUserResetRoute
   '/chat/$chatId': typeof AuthenticatedChatChatIdRoute
   '/dashboard/$section': typeof AuthenticatedDashboardSectionRoute
@@ -572,7 +588,9 @@ export interface FileRoutesById {
   '/about/': typeof AboutIndexRoute
   '/pricing/': typeof PricingIndexRoute
   '/rankings/': typeof RankingsIndexRoute
+  '/recharge/': typeof RechargeIndexRoute
   '/setup/': typeof SetupIndexRoute
+  '/topup/': typeof TopupIndexRoute
   '/(auth)/user/reset': typeof authUserResetRoute
   '/_authenticated/chat/$chatId': typeof AuthenticatedChatChatIdRoute
   '/_authenticated/dashboard/$section': typeof AuthenticatedDashboardSectionRoute
@@ -637,7 +655,9 @@ export interface FileRouteTypes {
     | '/about/'
     | '/pricing/'
     | '/rankings/'
+    | '/recharge/'
     | '/setup/'
+    | '/topup/'
     | '/user/reset'
     | '/chat/$chatId'
     | '/dashboard/$section'
@@ -699,7 +719,9 @@ export interface FileRouteTypes {
     | '/about'
     | '/pricing'
     | '/rankings'
+    | '/recharge'
     | '/setup'
+    | '/topup'
     | '/user/reset'
     | '/chat/$chatId'
     | '/dashboard/$section'
@@ -764,7 +786,9 @@ export interface FileRouteTypes {
     | '/about/'
     | '/pricing/'
     | '/rankings/'
+    | '/recharge/'
     | '/setup/'
+    | '/topup/'
     | '/(auth)/user/reset'
     | '/_authenticated/chat/$chatId'
     | '/_authenticated/dashboard/$section'
@@ -821,7 +845,9 @@ export interface RootRouteChildren {
   AboutIndexRoute: typeof AboutIndexRoute
   PricingIndexRoute: typeof PricingIndexRoute
   RankingsIndexRoute: typeof RankingsIndexRoute
+  RechargeIndexRoute: typeof RechargeIndexRoute
   SetupIndexRoute: typeof SetupIndexRoute
+  TopupIndexRoute: typeof TopupIndexRoute
   PricingModelIdIndexRoute: typeof PricingModelIdIndexRoute
 }
 
@@ -988,11 +1014,25 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof RankingsIndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/recharge/': {
+      id: '/recharge/'
+      path: '/recharge'
+      fullPath: '/recharge/'
+      preLoaderRoute: typeof RechargeIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/setup/': {
       id: '/setup/'
       path: '/setup'
       fullPath: '/setup/'
       preLoaderRoute: typeof SetupIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/topup/': {
+      id: '/topup/'
+      path: '/topup'
+      fullPath: '/topup/'
+      preLoaderRoute: typeof TopupIndexRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/(auth)/user/reset': {
@@ -1430,7 +1470,9 @@ const rootRouteChildren: RootRouteChildren = {
   AboutIndexRoute: AboutIndexRoute,
   PricingIndexRoute: PricingIndexRoute,
   RankingsIndexRoute: RankingsIndexRoute,
+  RechargeIndexRoute: RechargeIndexRoute,
   SetupIndexRoute: SetupIndexRoute,
+  TopupIndexRoute: TopupIndexRoute,
   PricingModelIdIndexRoute: PricingModelIdIndexRoute,
 }
 export const routeTree = rootRouteImport

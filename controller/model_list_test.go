@@ -215,6 +215,42 @@ func TestGetUserModelsFiltersByRequestedGroup(t *testing.T) {
 	require.Empty(t, decodeUserModelsResponse(t, vipRecorder))
 }
 
+func TestListModelsKeepsLegacyUnscopedTokenUnion(t *testing.T) {
+	withSelfUseModeEnabled(t)
+	db := setupModelListControllerTestDB(t)
+	require.NoError(t, db.Create(&[]model.Ability{
+		{Group: "default", Model: "gpt-5.6-sol", ChannelId: 1, Enabled: true},
+		{Group: "default", Model: "grok-4.6", ChannelId: 1, Enabled: true},
+	}).Error)
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	common.SetContextKey(ctx, constant.ContextKeyUserGroup, "default")
+	common.SetContextKey(ctx, constant.ContextKeyTokenGroup, "default")
+	ListModels(ctx, constant.ChannelTypeOpenAI)
+	assert.Equal(t, map[string]struct{}{"gpt-5.6-sol": {}, "grok-4.6": {}}, decodeListModelsResponse(t, recorder))
+}
+
+func TestListModelsFiltersByTokenSubscriptionType(t *testing.T) {
+	withSelfUseModeEnabled(t)
+	db := setupModelListControllerTestDB(t)
+	require.NoError(t, db.Create(&[]model.Ability{
+		{Group: "default", Model: "gpt-5.6-sol", ChannelId: 1, Enabled: true},
+		{Group: "default", Model: "grok-4.6", ChannelId: 1, Enabled: true},
+	}).Error)
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	common.SetContextKey(ctx, constant.ContextKeyUserGroup, "default")
+	common.SetContextKey(ctx, constant.ContextKeyTokenGroup, "default")
+	common.SetContextKey(ctx, constant.ContextKeyTokenSubscriptionType, model.SubscriptionTypeGrok)
+	ListModels(ctx, constant.ChannelTypeOpenAI)
+
+	assert.Equal(t, map[string]struct{}{"grok-4.6": {}}, decodeListModelsResponse(t, recorder))
+}
+
 func TestGetUserModelsExpandsAutoGroupsInConfiguredOrder(t *testing.T) {
 	originalAutoGroups := setting.AutoGroups2JsonString()
 	originalUsableGroups := setting.UserUsableGroups2JSONString()

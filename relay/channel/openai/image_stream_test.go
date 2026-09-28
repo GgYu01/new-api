@@ -14,6 +14,7 @@ import (
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
+	"github.com/QuantumNous/new-api/relay/imagebridge"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
@@ -543,6 +544,45 @@ func TestOpenaiImageStreamHandlerWrapsNonStandardDataShapes(t *testing.T) {
 			assert.Equal(t, tc.wantCount, info.PriceData.OtherRatios()["n"])
 		})
 	}
+}
+
+func TestOpenaiImageHandlerWritesNativeBridgeEnvelopesFromStoredResponse(t *testing.T) {
+	oldMode := gin.Mode()
+	gin.SetMode(gin.TestMode)
+	t.Cleanup(func() { gin.SetMode(oldMode) })
+	body := `{"data":[{"b64_json":"YWJj","revised_prompt":"clean"}],"usage":{"total_tokens":7}}`
+
+	t.Run("responses JSON", func(t *testing.T) {
+		c, recorder, resp, info := newImageTestContext(t, body, "application/json", false)
+		imagebridge.SetContext(c, imagebridge.Intent{
+			Envelope:    imagebridge.EnvelopeResponses,
+			ClientModel: "gpt-5.6-sol",
+		})
+
+		usage, relayErr := OpenaiImageHandler(c, info, resp)
+
+		require.Nil(t, relayErr)
+		require.Equal(t, 7, usage.TotalTokens)
+		require.Empty(t, recorder.Header().Get("Content-Length"))
+		require.Contains(t, recorder.Body.String(), `"type":"image_generation_call"`)
+		require.Contains(t, recorder.Body.String(), `"result":"YWJj"`)
+	})
+
+	t.Run("chat SSE", func(t *testing.T) {
+		c, recorder, resp, info := newImageTestContext(t, body, "application/json", false)
+		imagebridge.SetContext(c, imagebridge.Intent{
+			Envelope:    imagebridge.EnvelopeChat,
+			ClientModel: "gpt-5.6-sol",
+			Stream:      true,
+		})
+
+		_, relayErr := OpenaiImageHandler(c, info, resp)
+
+		require.Nil(t, relayErr)
+		require.Equal(t, "text/event-stream", recorder.Header().Get("Content-Type"))
+		require.Contains(t, recorder.Body.String(), `"object":"chat.completion.chunk"`)
+		require.Contains(t, recorder.Body.String(), "data: [DONE]\n\n")
+	})
 }
 
 // TestOpenaiImageHandlersReturnJSONError covers JSON error responses for both

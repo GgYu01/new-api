@@ -46,3 +46,11 @@ func TestSetupContextForTokenMalformedAutoGroupsFailsClosed(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, []string{}, value)
 }
+
+func TestSetupContextForTokenCarriesSubscriptionScope(t *testing.T) {
+	ctx := newTokenAutoGroupsContext()
+	token := &model.Token{Id: 1, UserId: 2, SubscriptionType: model.SubscriptionTypeGrok}
+
+	require.NoError(t, SetupContextForToken(ctx, token))
+	assert.Equal(t, model.SubscriptionTypeGrok, common.GetContextKeyString(ctx, constant.ContextKeyTokenSubscriptionType))
+}

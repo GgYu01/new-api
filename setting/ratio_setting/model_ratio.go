@@ -217,6 +217,18 @@ var defaultModelRatio = map[string]float64{
 	"SparkDesk-v3.5":                           1.2858, // ￥0.018 / 1k tokens
 	"SparkDesk-v4.0":                           1.2858,
 	"hunyuan":                                  7.143, // ¥0.1 / 1k tokens  // https://cloud.tencent.com/document/product/1729/97731#e0e6be58-60c8-469f-bdeb-6c264ce3b4d0
+	"gpt-6-astra":                               5.0, // $10 / 1M tokens
+	"claude-opus-4-6-thinking":                  2.5,
+	"claude-sonnet-4-6":                         1.5, // $3 / 1M tokens
+	"claude-sonnet-4-6-thinking":                1.5,
+	"grok-4.6":                                  1.0, // $2 / 1M tokens
+	"grok-4":                                    1.0,
+	"gemini-3.1-flash-image":                    0.25, // $0.50 / 1M tokens
+	"gpt-oss-120b":                              0.045, // $0.09 / 1M tokens
+	"gpt-oss-120b-chat":                         0.045,
+	"gpt-oss-120b-medium":                       0.045,
+	"gemini-2.5-flash-preview-04-17-nothinking": 0.075,
+	"gemini-2.5-flash-preview-05-20-nothinking": 0.075,
 	// https://platform.lingyiwanwu.com/docs#-计费单元
 	// 已经按照 7.2 来换算美元价格
 	"yi-34b-chat-0205":       0.18,
@@ -326,10 +338,24 @@ var modelRatioMap = types.NewRWMap[string, float64]()
 var completionRatioMap = types.NewRWMap[string, float64]()
 
 var defaultCompletionRatio = map[string]float64{
-	"gpt-4-gizmo-*":  2,
-	"gpt-4o-gizmo-*": 3,
-	"gpt-4-all":      2,
-	"gpt-image-1":    8,
+	"gpt-4-gizmo-*":               2,
+	"gpt-4o-gizmo-*":              3,
+	"gpt-4-all":                   2,
+	"gpt-image-1":                 8,
+	"gpt-6-astra":                 5,
+	"gpt-5.6-sol":                 5,
+	"gpt-5.6-terra":               6,
+	"gpt-5.6-luna":                6,
+	"claude-opus-4-6":             5,
+	"claude-opus-4-6-thinking":    5,
+	"claude-sonnet-4-6":           5,
+	"claude-sonnet-4-6-thinking":  5,
+	"grok-4.6":                    3,
+	"grok-4":                      3,
+	"gemini-3.1-flash-image":      6,
+	"gpt-oss-120b":                4,
+	"gpt-oss-120b-chat":           4,
+	"gpt-oss-120b-medium":         4,
 }
 
 // InitRatioSettings initializes all model related settings maps
@@ -488,6 +514,12 @@ func getHardcodedCompletionModelRatio(name string) (float64, bool) {
 	}
 
 	if strings.HasPrefix(name, "gpt-") {
+		if strings.HasPrefix(name, "gpt-6-astra") {
+			return 5, true
+		}
+		if strings.HasPrefix(name, "gpt-oss-120b") {
+			return 4, true
+		}
 		if strings.HasPrefix(name, "gpt-4o") {
 			if name == "gpt-4o-2024-05-13" {
 				return 3, true
@@ -501,6 +533,12 @@ func getHardcodedCompletionModelRatio(name string) (float64, bool) {
 		if strings.HasPrefix(name, "gpt-5") {
 			if !strings.Contains(name, ".") {
 				return 8, true
+			}
+			if strings.HasPrefix(name, "gpt-5.6-sol") {
+				return 5, true
+			}
+			if strings.HasPrefix(name, "gpt-5.6-terra") || strings.HasPrefix(name, "gpt-5.6-luna") {
+				return 6, true
 			}
 			if strings.HasPrefix(name, "gpt-5.4") {
 				if strings.HasPrefix(name, "gpt-5.4-nano") {
@@ -565,6 +603,8 @@ func getHardcodedCompletionModelRatio(name string) (float64, bool) {
 			return 2.5 / 0.3, false
 		} else if strings.HasPrefix(name, "gemini-robotics-er-1.5") {
 			return 2.5 / 0.3, false
+		} else if strings.HasPrefix(name, "gemini-3.1-flash-image") {
+			return 6, true
 		} else if strings.HasPrefix(name, "gemini-3-pro") {
 			if strings.HasPrefix(name, "gemini-3-pro-image") {
 				return 60, false
@@ -572,6 +612,11 @@ func getHardcodedCompletionModelRatio(name string) (float64, bool) {
 			return 6, false
 		}
 		return 4, false
+	}
+	if strings.HasPrefix(name, "grok-") {
+		if strings.HasPrefix(name, "grok-4") {
+			return 3, true
+		}
 	}
 	if strings.HasPrefix(name, "command") {
 		switch name {
@@ -641,7 +686,8 @@ func ModelRatio2JSONString() string {
 }
 
 var defaultImageRatio = map[string]float64{
-	"gpt-image-1": 2,
+	"gpt-image-1":            2,
+	"gemini-3.1-flash-image": 120,
 }
 var imageRatioMap = types.NewRWMap[string, float64]()
 var audioRatioMap = types.NewRWMap[string, float64]()

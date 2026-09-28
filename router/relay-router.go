@@ -64,7 +64,7 @@ func SetRelayRouter(router *gin.Engine) {
 	playgroundRouter := router.Group("/pg")
 	playgroundRouter.Use(middleware.RouteTag("relay"))
 	playgroundRouter.Use(middleware.SystemPerformanceCheck())
-	playgroundRouter.Use(middleware.UserAuth(), middleware.Distribute())
+	playgroundRouter.Use(middleware.UserAuth(), middleware.LogicalRequest(), middleware.Distribute())
 	{
 		playgroundRouter.POST("/chat/completions", controller.Playground)
 	}
@@ -77,11 +77,11 @@ func SetRelayRouter(router *gin.Engine) {
 		// response.create event; each event runs the ordinary request limiter.
 		relayV1Router.GET("/responses", controller.ResponsesWebSocket)
 	}
-	relayV1Router.Use(middleware.ModelRequestRateLimit())
+	relayV1Router.Use(middleware.GlobalTrafficControl(), middleware.ModelRequestRateLimit())
 	{
 		// WebSocket 路由（统一到 Relay）
 		wsRouter := relayV1Router.Group("")
-		wsRouter.Use(middleware.Distribute())
+		wsRouter.Use(middleware.LogicalRequest(), middleware.Distribute())
 		wsRouter.GET("/realtime", func(c *gin.Context) {
 			controller.Relay(c, types.RelayFormatOpenAIRealtime)
 		})
@@ -89,7 +89,7 @@ func SetRelayRouter(router *gin.Engine) {
 	{
 		//http router
 		httpRouter := relayV1Router.Group("")
-		httpRouter.Use(middleware.Distribute())
+		httpRouter.Use(middleware.LogicalRequest(), middleware.DetectImageBridge(), middleware.Distribute())
 
 		// claude related routes
 		// TODO: /messages/count_tokens is disabled. The current controller.CountClaudeTokens
@@ -158,7 +158,9 @@ func SetRelayRouter(router *gin.Engine) {
 		})
 
 		// not implemented
-		httpRouter.POST("/images/variations", controller.RelayNotImplemented)
+		httpRouter.POST("/images/variations", func(c *gin.Context) {
+			controller.Relay(c, types.RelayFormatOpenAIImage)
+		})
 		httpRouter.GET("/files", controller.RelayNotImplemented)
 		httpRouter.POST("/files", controller.RelayNotImplemented)
 		httpRouter.DELETE("/files/:id", controller.RelayNotImplemented)
@@ -183,6 +185,15 @@ func SetRelayRouter(router *gin.Engine) {
 	registerMjRouterGroup(relayMjModeRouter)
 	//relayMjRouter.Use()
 
+	relaySunoRouter := router.Group("/suno")
+	relaySunoRouter.Use(middleware.RouteTag("relay"))
+	relaySunoRouter.Use(middleware.SystemPerformanceCheck())
+	relaySunoRouter.Use(middleware.TokenAuth(), middleware.GlobalTrafficControl(), middleware.Distribute())
+	{
+		relaySunoRouter.POST("/submit/:action", controller.RelayTask)
+		relaySunoRouter.POST("/fetch", controller.RelayTaskFetch)
+		relaySunoRouter.GET("/fetch/:id", controller.RelayTaskFetch)
+	}
 	relayGeminiRouter := router.Group("/v1beta")
 	// :countTokens is not implemented. Answer it like an unregistered route
 	// before auth/channel selection instead of silently relaying it as
@@ -196,7 +207,7 @@ func SetRelayRouter(router *gin.Engine) {
 	relayGeminiRouter.Use(middleware.RouteTag("relay"))
 	relayGeminiRouter.Use(middleware.SystemPerformanceCheck())
 	relayGeminiRouter.Use(middleware.TokenAuth())
-	relayGeminiRouter.Use(middleware.ModelRequestRateLimit())
+	relayGeminiRouter.Use(middleware.GlobalTrafficControl())
 	relayGeminiRouter.Use(middleware.Distribute())
 	{
 		// Gemini API 路径格式: /v1beta/models/{model_name}:{action}
@@ -208,7 +219,7 @@ func SetRelayRouter(router *gin.Engine) {
 
 func registerMjRouterGroup(relayMjRouter *gin.RouterGroup) {
 	relayMjRouter.GET("/image/:id", relay.RelayMidjourneyImage)
-	relayMjRouter.Use(middleware.TokenAuth(), middleware.Distribute())
+	relayMjRouter.Use(middleware.TokenAuth(), middleware.GlobalTrafficControl(), middleware.Distribute())
 	{
 		relayMjRouter.POST("/submit/action", controller.RelayMidjourney)
 		relayMjRouter.POST("/submit/shorten", controller.RelayMidjourney)

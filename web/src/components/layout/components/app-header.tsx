@@ -30,6 +30,7 @@ import type { TopNavLink } from '../types'
 import { Header } from './header'
 import { SystemBrand } from './system-brand'
 import { TopNav } from './top-nav'
+import { VersionBadge } from './version-badge'
 
 /**
  * General application Header component
@@ -116,6 +117,9 @@ export function AppHeader({
       <div className='@container/system-brand flex min-w-0 flex-1 items-center gap-1'>
         <SystemBrand variant='inline' />
         <SystemUpdateAction presentation='version' />
+        <div className='ms-2 flex items-center'>
+          <VersionBadge />
+        </div>
       </div>
 
       {leftContent ? (

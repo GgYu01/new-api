@@ -42,6 +42,9 @@ func init() {
 		channelName := adaptor.GetChannelName()
 		modelNames := adaptor.GetModelList()
 		for _, modelName := range modelNames {
+			if service.IsDelistedModel(modelName) {
+				continue
+			}
 			openAIModels = append(openAIModels, dto.OpenAIModels{
 				Id:      modelName,
 				Object:  "model",
@@ -90,10 +93,6 @@ func init() {
 			OwnedBy: "midjourney",
 		})
 	}
-	openAIModelsMap = make(map[string]dto.OpenAIModels)
-	for _, aiModel := range openAIModels {
-		openAIModelsMap[aiModel.Id] = aiModel
-	}
 	channelId2Models = make(map[int][]string)
 	for i := 1; i <= constant.ChannelTypeDummy; i++ {
 		apiType, success := common.ChannelType2APIType(i)
@@ -118,6 +117,18 @@ func init() {
 	openAIModels = lo.UniqBy(openAIModels, func(m dto.OpenAIModels) string {
 		return m.Id
 	})
+	// Keep the public catalog owner stable even when another adaptor (for
+	// example Advanced Custom or a stale Codex ability) advertises the same
+	// identifier. codex-auto-review is an OpenAI model by policy.
+	for i := range openAIModels {
+		if strings.EqualFold(openAIModels[i].Id, "codex-auto-review") {
+			openAIModels[i].OwnedBy = "openai"
+		}
+	}
+	openAIModelsMap = make(map[string]dto.OpenAIModels, len(openAIModels))
+	for _, aiModel := range openAIModels {
+		openAIModelsMap[aiModel.Id] = aiModel
+	}
 }
 
 func channelOwnerName(channelType int) string {
@@ -174,6 +185,11 @@ func buildOpenAIModel(modelName string, ownerByModel map[string]string) dto.Open
 	}
 	if owner, ok := ownerByModel[modelName]; ok && owner != "" {
 		oaiModel.OwnedBy = owner
+	}
+	// This model is intentionally an OpenAI-supplied model even when a stale
+	// ability row still reports the legacy Codex channel owner.
+	if strings.EqualFold(modelName, "codex-auto-review") {
+		oaiModel.OwnedBy = "openai"
 	}
 	oaiModel.SupportedEndpointTypes = model.GetModelSupportEndpointTypes(modelName)
 	return oaiModel
@@ -250,6 +266,9 @@ func ListModels(c *gin.Context, modelType int) {
 	}
 	models := service.GetGroupsEnabledModels(ownerGroups)
 	for _, modelName := range models {
+		if service.IsDelistedModel(modelName) {
+			continue
+		}
 		if modelLimitEnable {
 			matchingName := ratio_setting.RoutingMatchModelName(modelName)
 			if !tokenModelLimit[modelName] && !tokenModelLimit[matchingName] {
@@ -260,6 +279,30 @@ func ListModels(c *gin.Context, modelType int) {
 			continue
 		}
 		userModelNames = append(userModelNames, modelName)
+	}
+	if userID := c.GetInt("id"); userID > 0 {
+		filteredModelNames, subscriptionErr := model.FilterModelsForSubscription(userID, userModelNames)
+		if subscriptionErr != nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{
+				"success": false,
+				"message": subscriptionErr.Error(),
+			})
+			return
+		}
+		userModelNames = filteredModelNames
+	}
+	if tokenScope := common.GetContextKeyString(c, constant.ContextKeyTokenSubscriptionType); tokenScope != "" {
+		filteredModelNames, scopeErr := model.FilterModelsForTokenSubscriptionType(tokenScope, userModelNames)
+		if scopeErr != nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"success": false, "message": scopeErr.Error()})
+			return
+		}
+		userModelNames = filteredModelNames
+	} else if c.GetInt("token_id") > 0 && !common.GetContextKeyBool(c, constant.ContextKeyTokenScopeExempt) {
+		// Ordinary authenticated keys must carry an explicit scope. Empty scope
+		// is reserved for an explicit system exemption and must not expose the
+		// user's model union.
+		userModelNames = []string{}
 	}
 
 	ownerByModel := map[string]string{}
@@ -348,6 +391,35 @@ func EnabledListModels(c *gin.Context) {
 func RetrieveModel(c *gin.Context, modelType int) {
 	modelId := c.Param("model")
 	if aiModel, ok := openAIModelsMap[modelId]; ok {
+		if strings.EqualFold(modelId, "codex-auto-review") {
+			aiModel.OwnedBy = "openai"
+		}
+		allowed := true
+		var err error
+		if userID := c.GetInt("id"); userID > 0 {
+			allowed, err = model.UserSubscriptionAllowsModel(userID, modelId)
+		}
+		if allowed {
+			if tokenScope := common.GetContextKeyString(c, constant.ContextKeyTokenSubscriptionType); tokenScope != "" {
+				allowed = model.TokenSubscriptionTypeAllowsModel(tokenScope, modelId)
+			} else if c.GetInt("token_id") > 0 && !common.GetContextKeyBool(c, constant.ContextKeyTokenScopeExempt) {
+				allowed = false
+			}
+		}
+		if err != nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": err.Error()})
+			return
+		}
+		if !allowed {
+			openAIError := types.OpenAIError{
+				Message: fmt.Sprintf("The model '%s' does not exist", modelId),
+				Type:    "invalid_request_error",
+				Param:   "model",
+				Code:    "model_not_found",
+			}
+			c.JSON(http.StatusOK, gin.H{"error": openAIError})
+			return
+		}
 		switch modelType {
 		case constant.ChannelTypeAnthropic:
 			c.JSON(200, dto.AnthropicModel{

@@ -52,6 +52,7 @@ func GetStatus(c *gin.Context) {
 
 	data := gin.H{
 		"version":                     common.Version,
+		"build_info":                  common.GetBuildInfo(),
 		"start_time":                  common.StartTime,
 		"email_verification":          common.EmailVerificationEnabled,
 		"github_oauth":                common.GitHubOAuthEnabled,
@@ -180,6 +181,14 @@ func GetNotice(c *gin.Context) {
 	notice := common.OptionMap["Notice"]
 	common.OptionMapRWMutex.RUnlock()
 	serveRevalidatedJSON(c, notice)
+}
+
+func GetBuildInfo(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "",
+		"data":    common.GetBuildInfo(),
+	})
 }
 
 func GetAbout(c *gin.Context) {

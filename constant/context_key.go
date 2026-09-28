@@ -19,8 +19,11 @@ const (
 	ContextKeyChannelConstraints     ContextKey = "channel_constraints"
 	ContextKeyTokenModelLimitEnabled ContextKey = "token_model_limit_enabled"
 	ContextKeyTokenModelLimit        ContextKey = "token_model_limit"
+	ContextKeyTokenSubscriptionType  ContextKey = "token_subscription_type"
+	ContextKeyTokenScopeExempt       ContextKey = "token_scope_exempt"
 	ContextKeyTokenCrossGroupRetry   ContextKey = "token_cross_group_retry"
 	ContextKeyTokenAutoGroups        ContextKey = "token_auto_groups"
+	ContextKeySubscriptionAccess     ContextKey = "subscription_access"
 
 	/* channel related keys */
 	ContextKeyChannelId                ContextKey = "channel_id"
@@ -69,6 +72,17 @@ const (
 	ContextKeyLanguage             ContextKey = "language"
 	ContextKeyIsStream             ContextKey = "is_stream"
 	ContextKeyResponseStreamStatus ContextKey = "response_stream_status"
+
+	// ContextKeyHeadersCommitted is true after HTTP headers or a legal SSE
+	// comment heartbeat have been written. It is not a semantic commit.
+	ContextKeyHeadersCommitted ContextKey = "headers_committed"
+	// ContextKeyKeepaliveOnly is true when the only body bytes so far are
+	// legal SSE comment heartbeats.
+	ContextKeyKeepaliveOnly ContextKey = "keepalive_only"
+	// ContextKeySemanticCommitted is true after text, tool, media, or a
+	// bound response ID has been exposed to the customer.
+	ContextKeySemanticCommitted ContextKey = "semantic_committed"
+	ContextKeyLogicalRequest    ContextKey = "logical_request"
 
 	// ContextKeyAuditLogged marks that the current request has already recorded
 	// a manage/operation audit log inside the handler. When set, the admin-audit

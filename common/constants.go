@@ -163,6 +163,10 @@ var SyncFrequency int // unit is second
 var BatchUpdateEnabled = false
 var BatchUpdateInterval int
 
+// RelayTimeout is the RELAY_TIMEOUT operational override (seconds). Default 0:
+// shared relay http.Client values keep Timeout==0 so a 60m logical request is
+// not killed by an absolute Client deadline. Set only as a last-resort kill
+// switch; production bounds come from phase contexts + Transport Dial/TLS.
 var RelayTimeout int // unit is second
 
 var RelayIdleConnTimeout int // unit is second
@@ -185,8 +189,14 @@ var GeminiSafetySetting string
 var CohereSafetySetting string
 
 const (
-	RequestIdKey         = "X-Oneapi-Request-Id"
-	UpstreamRequestIdKey = "X-Upstream-Request-Id"
+	RequestIdKey                = "X-Oneapi-Request-Id"
+	UpstreamRequestIdKey        = "X-Upstream-Request-Id"
+	ClientRequestIdKey          = "X-Client-Request-Id"
+	TraceparentHeaderKey        = "traceparent"
+	TracestateHeaderKey         = "tracestate"
+	ContextKeyExternalRequestId = "external_client_request_id"
+	ContextKeyTraceparent       = "external_traceparent"
+	ContextKeyTracestate        = "external_tracestate"
 )
 
 const (

@@ -8,6 +8,9 @@ import (
 // 简化的供应商映射规则
 var defaultVendorRules = map[string]string{
 	"gpt":      "OpenAI",
+	"openai":   "OpenAI",
+	"codex":    "OpenAI",
+	"chatgpt":  "OpenAI",
 	"dall-e":   "OpenAI",
 	"whisper":  "OpenAI",
 	"o1":       "OpenAI",

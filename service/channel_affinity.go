@@ -27,6 +27,8 @@ const (
 	ginKeyChannelAffinityMeta       = "channel_affinity_meta"
 	ginKeyChannelAffinityLogInfo    = "channel_affinity_log_info"
 	ginKeyChannelAffinitySkipRetry  = "channel_affinity_skip_retry_on_failure"
+	ginKeyChannelAffinityUsedChannelID = "channel_affinity_used_channel_id"
+	ginKeyChannelAffinitySelectedGroup = "channel_affinity_selected_group"
 
 	channelAffinityCacheNamespace           = "new-api:channel_affinity:v1"
 	channelAffinityUsageCacheStatsNamespace = "new-api:channel_affinity_usage_cache_stats:v1"
@@ -689,6 +691,8 @@ func MarkChannelAffinityUsed(c *gin.Context, selectedGroup string, channelID int
 		return
 	}
 	c.Set(ginKeyChannelAffinitySkipRetry, meta.SkipRetry)
+	c.Set(ginKeyChannelAffinityUsedChannelID, channelID)
+	c.Set(ginKeyChannelAffinitySelectedGroup, selectedGroup)
 	info := map[string]any{
 		"reason":         meta.RuleName,
 		"rule_name":      meta.RuleName,
@@ -704,6 +708,37 @@ func MarkChannelAffinityUsed(c *gin.Context, selectedGroup string, channelID int
 		"key_fp":         meta.KeyFingerprint,
 	}
 	c.Set(ginKeyChannelAffinityLogInfo, info)
+}
+
+func GetUsedChannelAffinity(c *gin.Context) (channelID int, selectedGroup string, active bool) {
+	if c == nil {
+		return 0, "", false
+	}
+	v, ok := c.Get(ginKeyChannelAffinityUsedChannelID)
+	if !ok {
+		return 0, "", false
+	}
+	chID, ok := v.(int)
+	if !ok || chID <= 0 {
+		return 0, "", false
+	}
+	grp, _ := c.Get(ginKeyChannelAffinitySelectedGroup)
+	selectedGroupStr, _ := grp.(string)
+	return chID, selectedGroupStr, true
+}
+
+func ShouldAllowSameChannelAffinityRetry(c *gin.Context, retryCount int) bool {
+	if c == nil {
+		return false
+	}
+	chID, _, active := GetUsedChannelAffinity(c)
+	if !active || chID <= 0 {
+		return false
+	}
+	if retryCount >= 2 {
+		return false
+	}
+	return true
 }
 
 func AppendChannelAffinityAdminInfo(c *gin.Context, other *model.LogOther) {

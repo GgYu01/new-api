@@ -56,6 +56,11 @@ const defaultOperationsSettings: OperationsSettings = {
   'perf_metrics_setting.flush_interval': 5,
   'perf_metrics_setting.bucket_time': 'hour',
   'perf_metrics_setting.retention_days': 0,
+  TrafficControlEnabled: true,
+  TrafficControlMode: 'concurrency',
+  TrafficControlGlobalRPM: 240,
+  TrafficControlBurst: 32,
+  TrafficControlMaxActiveRequests: 240,
 }
 
 export function OperationsSettings() {
