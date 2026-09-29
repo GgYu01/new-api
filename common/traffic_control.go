@@ -1,6 +1,7 @@
 package common
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strconv"
@@ -118,6 +119,8 @@ type TrafficControlMetrics struct {
 	AdmittedTotal       int64                `json:"admitted_total"`
 	RejectedRPMTotal    int64                `json:"rejected_rpm_total"`
 	RejectedActiveTotal int64                `json:"rejected_active_total"`
+	UnknownStateTotal   int64                `json:"unknown_state_total"`
+	ClusterActive       int64                `json:"cluster_active,omitempty"`
 	Revision            uint64               `json:"revision"`
 	Config              TrafficControlConfig `json:"config"`
 }
@@ -142,13 +145,35 @@ type TrafficController struct {
 	admitted    atomic.Int64
 	rejectedRPM atomic.Int64
 	rejectedAct atomic.Int64
+	unknownAct  atomic.Int64
+	instanceID  string
+	sharedStore SharedPermitStore
 }
 
 func NewTrafficController(cfg TrafficControlConfig, now time.Time) (*TrafficController, error) {
+	return NewTrafficControllerWithStore(cfg, now, generateInstanceID(), nil)
+}
+
+func NewTrafficControllerWithStore(cfg TrafficControlConfig, now time.Time, instanceID string, store SharedPermitStore) (*TrafficController, error) {
 	if err := ValidateTrafficControlConfig(cfg); err != nil {
 		return nil, err
 	}
-	return &TrafficController{cfg: cfg, tokens: float64(cfg.Burst), lastRefill: now}, nil
+	if instanceID == "" {
+		instanceID = generateInstanceID()
+	}
+	return &TrafficController{
+		cfg:         cfg,
+		tokens:      float64(cfg.Burst),
+		lastRefill:  now,
+		instanceID:  instanceID,
+		sharedStore: store,
+	}, nil
+}
+
+func (t *TrafficController) SetSharedStore(store SharedPermitStore) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.sharedStore = store
 }
 
 func (t *TrafficController) Config() TrafficControlConfig {
@@ -269,12 +294,37 @@ func (t *TrafficController) refillLocked(now time.Time) {
 func (t *TrafficController) Admit(now time.Time) (*TrafficLease, time.Duration, TrafficControlRejectReason) {
 	t.mu.Lock()
 	cfg := t.cfg
-	if cfg.Enabled && (cfg.Mode == TrafficControlModeConcurrency || cfg.Mode == TrafficControlModeHybrid) && cfg.MaxActiveRequests > 0 && t.active.Load() >= cfg.MaxActiveRequests {
-		t.mu.Unlock()
+	store := t.sharedStore
+	t.mu.Unlock()
+
+	var leaseID string
+	if store != nil && cfg.Enabled && (cfg.Mode == TrafficControlModeConcurrency || cfg.Mode == TrafficControlModeHybrid) && cfg.MaxActiveRequests > 0 {
+		leaseID = fmt.Sprintf("%s:%d", t.instanceID, time.Now().UnixNano())
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		admitted, _, retry, err := store.AcquireLease(ctx, leaseID, cfg.MaxActiveRequests, 0)
+		cancel()
+		if err == nil && !admitted {
+			t.rejectedAct.Add(1)
+			return nil, retry, TrafficControlRejectActive
+		}
+	} else if cfg.Enabled && (cfg.Mode == TrafficControlModeConcurrency || cfg.Mode == TrafficControlModeHybrid) && cfg.MaxActiveRequests > 0 && t.active.Load() >= cfg.MaxActiveRequests {
 		t.rejectedAct.Add(1)
 		return nil, time.Second, TrafficControlRejectActive
 	}
-	if cfg.Enabled && (cfg.Mode == TrafficControlModeRPM || cfg.Mode == TrafficControlModeHybrid) {
+
+	if store != nil && cfg.Enabled && (cfg.Mode == TrafficControlModeRPM || cfg.Mode == TrafficControlModeHybrid) {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		allowed, wait, err := store.AcquireRPMToken(ctx, cfg.GlobalRPM, cfg.Burst, now)
+		cancel()
+		if err == nil && !allowed {
+			if leaseID != "" {
+				_ = store.ReleaseLease(context.Background(), leaseID)
+			}
+			t.rejectedRPM.Add(1)
+			return nil, wait, TrafficControlRejectRPM
+		}
+	} else if cfg.Enabled && (cfg.Mode == TrafficControlModeRPM || cfg.Mode == TrafficControlModeHybrid) {
+		t.mu.Lock()
 		t.refillLocked(now)
 		if t.tokens < 1 {
 			retry := time.Duration((1 - t.tokens) * 60 / float64(cfg.GlobalRPM) * float64(time.Second))
@@ -282,16 +332,53 @@ func (t *TrafficController) Admit(now time.Time) (*TrafficLease, time.Duration, 
 				retry = time.Millisecond
 			}
 			t.mu.Unlock()
+			if leaseID != "" && store != nil {
+				_ = store.ReleaseLease(context.Background(), leaseID)
+			}
 			t.rejectedRPM.Add(1)
 			return nil, retry, TrafficControlRejectRPM
 		}
 		t.tokens--
+		t.mu.Unlock()
 	}
+
 	current := t.active.Add(1)
-	t.mu.Unlock()
 	trafficUpdateAtomicPeak(&t.activePeak, current)
 	t.admitted.Add(1)
-	return &TrafficLease{controller: t}, 0, ""
+
+	lease := &TrafficLease{
+		controller: t,
+		leaseID:    leaseID,
+		stopRenew:  make(chan struct{}),
+	}
+
+	if store != nil && leaseID != "" {
+		renewInterval := 5 * time.Second
+		if rStore, ok := store.(*RedisSharedPermitStore); ok {
+			renewInterval = rStore.GetRenewInterval()
+		}
+		stopChan := lease.stopRenew
+		go func() {
+			ticker := time.NewTicker(renewInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-stopChan:
+					return
+				case <-ticker.C:
+					renewed, err := store.RenewLease(context.Background(), leaseID, 0)
+					if err == nil && !renewed {
+						if !lease.isUnknown {
+							lease.isUnknown = true
+							t.unknownAct.Add(1)
+						}
+					}
+				}
+			}
+		}()
+	}
+
+	return lease, 0, ""
 }
 
 func trafficUpdateAtomicPeak(peak *atomic.Int64, value int64) {
@@ -303,10 +390,31 @@ func trafficUpdateAtomicPeak(peak *atomic.Int64, value int64) {
 	}
 }
 
-func (t *TrafficController) release() { t.active.Add(-1) }
+func (t *TrafficController) releaseLease(l *TrafficLease) {
+	if l == nil {
+		return
+	}
+	if l.stopRenew != nil {
+		select {
+		case <-l.stopRenew:
+		default:
+			close(l.stopRenew)
+		}
+	}
+	if l.leaseID != "" && t.sharedStore != nil {
+		_ = t.sharedStore.ReleaseLease(context.Background(), l.leaseID)
+	}
+	if l.isUnknown {
+		t.unknownAct.Add(-1)
+	}
+	t.active.Add(-1)
+}
 
 type TrafficLease struct {
 	controller *TrafficController
+	leaseID    string
+	stopRenew  chan struct{}
+	isUnknown  bool
 	once       sync.Once
 }
 
@@ -316,7 +424,7 @@ func (l *TrafficLease) Release() {
 	}
 	l.once.Do(func() {
 		if l.controller != nil {
-			l.controller.release()
+			l.controller.releaseLease(l)
 		}
 	})
 }
@@ -325,13 +433,22 @@ func (t *TrafficController) Metrics() TrafficControlMetrics {
 	t.mu.Lock()
 	cfg := t.cfg
 	rev := t.revision.Load()
+	store := t.sharedStore
 	t.mu.Unlock()
+
+	var clusterActive int64
+	if store != nil {
+		clusterActive, _ = store.ClusterActive(context.Background())
+	}
+
 	return TrafficControlMetrics{
 		ActiveCurrent:       t.active.Load(),
 		ActivePeak:          t.activePeak.Load(),
 		AdmittedTotal:       t.admitted.Load(),
 		RejectedRPMTotal:    t.rejectedRPM.Load(),
 		RejectedActiveTotal: t.rejectedAct.Load(),
+		UnknownStateTotal:   t.unknownAct.Load(),
+		ClusterActive:       clusterActive,
 		Revision:            rev,
 		Config:              cfg,
 	}

@@ -464,6 +464,7 @@ func TestSessionRulesInheritOrOverrideGlobalDefault(t *testing.T) {
 			})
 		}
 	}
+}
 
 func TestChannelAffinityRetryDecoupling(t *testing.T) {
 	rec := httptest.NewRecorder()

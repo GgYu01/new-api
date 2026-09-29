@@ -123,7 +123,15 @@ func (s *BillingSession) Refund(c *gin.Context) {
 	// 持久化退款意图：这是崩溃恢复的依据。同步写入。
 	// 若写入失败，不能将进程内标记为永久已退款，以保留恢复与重试机会。
 	if sub, ok := s.funding.(*SubscriptionFunding); ok && sub.requestId != "" {
-		if err := model.MarkSubscriptionPreConsumeRefundRequested(sub.requestId); err != nil {
+		var tokenConsumedForIntent int64
+		var tokenIdForIntent int
+		var tokenKeyForIntent string
+		if !s.relayInfo.IsPlayground && s.tokenConsumed > 0 {
+			tokenIdForIntent = s.relayInfo.TokenId
+			tokenKeyForIntent = s.relayInfo.TokenKey
+			tokenConsumedForIntent = int64(s.tokenConsumed)
+		}
+		if err := model.MarkSubscriptionPreConsumeRefundRequestedWithToken(sub.requestId, tokenIdForIntent, tokenKeyForIntent, tokenConsumedForIntent); err != nil {
 			common.SysLog("error marking subscription refund requested (requestId=" + sub.requestId + "): " + err.Error())
 			s.mu.Unlock()
 			return
@@ -148,18 +156,32 @@ func (s *BillingSession) Refund(c *gin.Context) {
 	funding := s.funding
 
 	gopool.Go(func() {
-		// 1) 退还资金来源
+		// 1) 订阅退款：原子包含 subscription quota + token quota 在同一事务提交，消灭崩溃窗口
+		if sub, ok := funding.(*SubscriptionFunding); ok && sub.requestId != "" {
+			var tokenConsumedToRefund int64
+			var tokenIdToRefund int
+			var tokenKeyToRefund string
+			if !isPlayground && tokenConsumed > 0 {
+				tokenIdToRefund = tokenId
+				tokenKeyToRefund = tokenKey
+				tokenConsumedToRefund = int64(tokenConsumed)
+			}
+			if err := model.RefundSubscriptionPreConsumeWithToken(sub.requestId, tokenIdToRefund, tokenKeyToRefund, tokenConsumedToRefund); err != nil {
+				common.SysLog("error refunding subscription with token: " + err.Error())
+			}
+			return
+		}
+
+		// 2) 钱包资金来源退款
 		if err := funding.Refund(); err != nil {
 			common.SysLog("error refunding billing source: " + err.Error())
 		}
 		if extraReserved > 0 && funding.Source() == BillingSourceSubscription && subscriptionId > 0 {
-			if sub, ok := funding.(*SubscriptionFunding); !ok || sub.requestId == "" {
-				if err := model.PostConsumeUserSubscriptionDelta(subscriptionId, -int64(extraReserved)); err != nil {
-					common.SysLog("error refunding subscription extra reserved quota: " + err.Error())
-				}
+			if err := model.PostConsumeUserSubscriptionDelta(subscriptionId, -int64(extraReserved)); err != nil {
+				common.SysLog("error refunding subscription extra reserved quota: " + err.Error())
 			}
 		}
-		// 2) 退还令牌额度
+		// 3) 退还令牌额度（针对钱包预扣路径）
 		if tokenConsumed > 0 && !isPlayground {
 			if err := model.IncreaseTokenQuota(tokenId, tokenKey, tokenConsumed); err != nil {
 				common.SysLog("error refunding token quota: " + err.Error())

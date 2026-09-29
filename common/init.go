@@ -20,6 +20,7 @@ var (
 	PrintVersion = flag.Bool("version", false, "print version and exit")
 	PrintHelp    = flag.Bool("help", false, "print help and exit")
 	LogDir       = flag.String("log-dir", "./logs", "specify the log directory")
+	ServiceRole  = flag.String("role", "", "service role: all, api, worker (defaults to SERVICE_ROLE/ROLE env or 'all')")
 )
 
 func printHelp() {
@@ -94,6 +95,25 @@ func InitEnv() {
 	MemoryCacheEnabled = os.Getenv("MEMORY_CACHE_ENABLED") == "true"
 	IsMasterNode = os.Getenv("NODE_TYPE") != "slave"
 	PasswordLoginEncryptionEnabled = GetEnvOrDefaultBool("PASSWORD_LOGIN_ENCRYPTION_ENABLED", false)
+
+	configuredRole := strings.ToLower(strings.TrimSpace(*ServiceRole))
+	if configuredRole == "" {
+		configuredRole = strings.ToLower(strings.TrimSpace(os.Getenv("SERVICE_ROLE")))
+	}
+	if configuredRole == "" {
+		configuredRole = strings.ToLower(strings.TrimSpace(os.Getenv("ROLE")))
+	}
+	if configuredRole == "" {
+		configuredRole = ServiceRoleAll
+	}
+	switch configuredRole {
+	case ServiceRoleAll, ServiceRoleAPI, ServiceRoleWorker:
+		RunningRole = configuredRole
+	default:
+		log.Fatalf("invalid service role %q: must be 'all', 'api', or 'worker'", configuredRole)
+	}
+	SysLog(fmt.Sprintf("service role configured: %s", RunningRole))
+
 	initNodeNameIdentity()
 	TLSInsecureSkipVerify = GetEnvOrDefaultBool("TLS_INSECURE_SKIP_VERIFY", false)
 	if TLSInsecureSkipVerify {

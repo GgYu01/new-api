@@ -2,6 +2,7 @@ package service
 
 import (
 	"errors"
+	"sync"
 	"time"
 
 	"github.com/QuantumNous/new-api/model"
@@ -35,6 +36,8 @@ var ErrInsufficientWalletQuota = errors.New("wallet quota insufficient")
 type WalletFunding struct {
 	userId   int
 	consumed int // 实际预扣的用户额度
+	refunded bool
+	mu       sync.Mutex
 }
 
 func (w *WalletFunding) Source() string { return BillingSourceWallet }
@@ -50,7 +53,9 @@ func (w *WalletFunding) PreConsume(amount int) error {
 	if !reserved {
 		return ErrInsufficientWalletQuota
 	}
+	w.mu.Lock()
 	w.consumed = amount
+	w.mu.Unlock()
 	return nil
 }
 
@@ -65,12 +70,16 @@ func (w *WalletFunding) Settle(delta int) error {
 }
 
 func (w *WalletFunding) Refund() error {
-	if w.consumed <= 0 {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.consumed <= 0 || w.refunded {
 		return nil
 	}
-	// IncreaseUserQuota 是 quota += N 的非幂等操作，不能重试，否则会多退额度。
-	// 订阅的 RefundSubscriptionPreConsume 有 requestId 幂等保护所以可以重试。
-	return model.IncreaseUserQuota(w.userId, w.consumed, false)
+	if err := model.IncreaseUserQuota(w.userId, w.consumed, false); err != nil {
+		return err
+	}
+	w.refunded = true
+	return nil
 }
 
 // ---------------------------------------------------------------------------

@@ -210,6 +210,22 @@ func IsValidateRole(role int) bool {
 	return role == RoleGuestUser || role == RoleCommonUser || role == RoleAdminUser || role == RoleRootUser
 }
 
+const (
+	ServiceRoleAll    = "all"
+	ServiceRoleAPI    = "api"
+	ServiceRoleWorker = "worker"
+)
+
+var RunningRole = ServiceRoleAll
+
+func IsAPIRole() bool {
+	return RunningRole == ServiceRoleAll || RunningRole == ServiceRoleAPI
+}
+
+func IsWorkerRole() bool {
+	return RunningRole == ServiceRoleAll || RunningRole == ServiceRoleWorker
+}
+
 var (
 	FileUploadPermission    = RoleGuestUser
 	FileDownloadPermission  = RoleGuestUser

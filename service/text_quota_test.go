@@ -296,6 +296,7 @@ func runFixedPriceAccountingCases(t *testing.T, db, logDB *gorm.DB) {
 			}
 		})
 	}
+}
 
 func TestCalculateTextQuotaSummaryBillsEstimateWhenUpstreamOmitsUsage(t *testing.T) {
 	gin.SetMode(gin.TestMode)

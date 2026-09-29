@@ -118,51 +118,60 @@ func main() {
 	// 周期性重载授权策略，保证多节点/多 master 部署下权限变更能传播到每个实例
 	go authz.StartPolicySync(common.SyncFrequency)
 
-	// 数据看板
-	go model.UpdateQuotaData()
+	// Background worker subsystems: only start when running as worker or all
+	if common.IsWorkerRole() {
+		common.SysLog("starting background worker subsystems (role=" + common.RunningRole + ")...")
+		// 数据看板
+		go model.UpdateQuotaData()
 
-	if os.Getenv("CHANNEL_UPDATE_FREQUENCY") != "" {
-		frequency, err := strconv.Atoi(os.Getenv("CHANNEL_UPDATE_FREQUENCY"))
-		if err != nil {
-			common.FatalLog("failed to parse CHANNEL_UPDATE_FREQUENCY: " + err.Error())
+		if os.Getenv("CHANNEL_UPDATE_FREQUENCY") != "" {
+			frequency, err := strconv.Atoi(os.Getenv("CHANNEL_UPDATE_FREQUENCY"))
+			if err != nil {
+				common.FatalLog("failed to parse CHANNEL_UPDATE_FREQUENCY: " + err.Error())
+			}
+			go controller.AutomaticallyUpdateChannels(frequency)
 		}
-		go controller.AutomaticallyUpdateChannels(frequency)
+
+		// Codex credential auto-refresh check every 10 minutes, refresh when expires within 1 day
+		service.StartCodexCredentialAutoRefreshTask()
+
+		// Subscription quota reset task (daily/weekly/monthly/custom)
+		service.StartSubscriptionQuotaResetTask()
+
+		// Wire task polling adaptor factory (breaks service -> relay import cycle).
+		// Must run before the system task runner starts: the async_task_poll handler
+		// calls service.RunTaskPollingOnce, which needs this factory set.
+		service.GetTaskAdaptorFunc = func(platform constant.TaskPlatform) service.TaskPollingAdaptor {
+			a := relay.GetTaskAdaptor(platform)
+			if a == nil {
+				return nil
+			}
+			return a
+		}
+
+		// Register the periodic channel test, upstream model update, and async task
+		// polling (Midjourney / Suno / video) jobs as scheduled system tasks
+		// (DB-lease dedup across masters + run history), then start the runner that
+		// schedules and executes them. Master-only execution and the UpdateTask
+		// switch are enforced inside the runner and each handler's Enabled().
+		controller.RegisterScheduledSystemTasks()
+		service.StartSystemTaskRunner()
+
+		// Auth session / artifact cleanup
+		service.StartAuthArtifactCleanup()
+
+		if os.Getenv("BATCH_UPDATE_ENABLED") == "true" {
+			common.BatchUpdateEnabled = true
+			common.SysLog("batch update enabled with interval " + strconv.Itoa(common.BatchUpdateInterval) + "s")
+			model.InitBatchUpdater()
+		}
+	} else {
+		common.SysLog("background worker subsystems disabled for api-only role")
 	}
-
-	// Codex credential auto-refresh check every 10 minutes, refresh when expires within 1 day
-	service.StartCodexCredentialAutoRefreshTask()
-
-	// Subscription quota reset task (daily/weekly/monthly/custom)
-	service.StartSubscriptionQuotaResetTask()
 
 	// Report this process as a system instance so the System Info page can show
 	// all currently alive nodes in multi-instance deployments.
 	service.StartSystemInstanceReporter()
-
-	// Wire task polling adaptor factory (breaks service -> relay import cycle).
-	// Must run before the system task runner starts: the async_task_poll handler
-	// calls service.RunTaskPollingOnce, which needs this factory set.
-	service.GetTaskAdaptorFunc = func(platform constant.TaskPlatform) service.TaskPollingAdaptor {
-		a := relay.GetTaskAdaptor(platform)
-		if a == nil {
-			return nil
-		}
-		return a
-	}
-
-	// Register the periodic channel test, upstream model update, and async task
-	// polling (Midjourney / Suno / video) jobs as scheduled system tasks
-	// (DB-lease dedup across masters + run history), then start the runner that
-	// schedules and executes them. Master-only execution and the UpdateTask
-	// switch are enforced inside the runner and each handler's Enabled().
-	controller.RegisterScheduledSystemTasks()
-	service.StartSystemTaskRunner()
-
-	if os.Getenv("BATCH_UPDATE_ENABLED") == "true" {
-		common.BatchUpdateEnabled = true
-		common.SysLog("batch update enabled with interval " + strconv.Itoa(common.BatchUpdateInterval) + "s")
-		model.InitBatchUpdater()
-	}
 
 	if os.Getenv("ENABLE_PPROF") == "true" {
 		gopool.Go(func() {
@@ -196,16 +205,35 @@ func main() {
 	//server.Use(gzip.Gzip(gzip.DefaultCompression))
 	server.Use(middleware.RequestId())
 	server.Use(middleware.Version())
-	server.Use(middleware.I18n())
-	middleware.SetUpLogger(server)
-	InjectUmamiAnalytics()
-	InjectGoogleAnalytics()
 
-	// 设置路由
-	router.SetRouter(server, router.WebAssets{
-		BuildFS:   buildFS,
-		IndexPage: indexPage,
-	})
+	if common.IsAPIRole() {
+		server.Use(middleware.I18n())
+		middleware.SetUpLogger(server)
+		InjectUmamiAnalytics()
+		InjectGoogleAnalytics()
+
+		// 设置完整路由
+		router.SetRouter(server, router.WebAssets{
+			BuildFS:   buildFS,
+			IndexPage: indexPage,
+		})
+	} else {
+		// Worker role: minimal healthcheck endpoint without exposing public/user APIs
+		server.GET("/health", func(c *gin.Context) {
+			c.JSON(http.StatusOK, gin.H{
+				"status":  "ok",
+				"role":    common.RunningRole,
+				"version": common.Version,
+			})
+		})
+		server.GET("/", func(c *gin.Context) {
+			c.JSON(http.StatusOK, gin.H{
+				"service": "NewAPI Worker",
+				"role":    common.RunningRole,
+				"version": common.Version,
+			})
+		})
+	}
 	var port = os.Getenv("PORT")
 	if port == "" {
 		port = strconv.Itoa(*common.Port)

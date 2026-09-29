@@ -6,6 +6,7 @@ import (
 	"unicode"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 
 	"github.com/gin-gonic/gin"
@@ -15,7 +16,24 @@ var pingLiteral = []byte(": PING")
 
 func ClassifyDownstreamPayload(c *gin.Context, data []byte) {
 	lr := FromContext(c)
-	classifyWrite(lr, data)
+	if lr != nil {
+		classifyWrite(lr, data)
+	}
+	if c != nil && len(data) > 0 {
+		trimmed := bytes.TrimSpace(data)
+		if isKeepaliveSSE(trimmed) || isSSEComment(trimmed) {
+			common.SetContextKey(c, constant.ContextKeyHeadersCommitted, true)
+			if !common.GetContextKeyBool(c, constant.ContextKeySemanticCommitted) {
+				common.SetContextKey(c, constant.ContextKeyKeepaliveOnly, true)
+			}
+		} else if classifySemanticPayload(trimmed) {
+			common.SetContextKey(c, constant.ContextKeyHeadersCommitted, true)
+			common.SetContextKey(c, constant.ContextKeyKeepaliveOnly, false)
+			common.SetContextKey(c, constant.ContextKeySemanticCommitted, true)
+		} else {
+			common.SetContextKey(c, constant.ContextKeyHeadersCommitted, true)
+		}
+	}
 }
 
 // ShouldHoldDownstream reports that this payload must not reach the customer

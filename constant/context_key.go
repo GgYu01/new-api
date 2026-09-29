@@ -24,6 +24,7 @@ const (
 	ContextKeyTokenCrossGroupRetry   ContextKey = "token_cross_group_retry"
 	ContextKeyTokenAutoGroups        ContextKey = "token_auto_groups"
 	ContextKeySubscriptionAccess     ContextKey = "subscription_access"
+	ContextKeyTokenSpecificChannelId ContextKey = "token_specific_channel_id"
 
 	/* channel related keys */
 	ContextKeyChannelId                ContextKey = "channel_id"

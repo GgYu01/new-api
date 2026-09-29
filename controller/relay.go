@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -23,6 +24,7 @@ import (
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/relay/imagebridge"
+	"github.com/QuantumNous/new-api/relay/lifecycle"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
@@ -264,6 +266,23 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		}
 		c.Request.Body = io.NopCloser(bodyStorage)
 
+		origCtx := c.Request.Context()
+		lr := lifecycle.FromContext(c)
+		var attemptID string
+		var attemptCtx context.Context
+		var beginErr error
+		if lr != nil {
+			attemptID, attemptCtx, beginErr = lr.BeginAttempt()
+			if beginErr != nil {
+				logger.LogError(c, fmt.Sprintf("lifecycle.BeginAttempt failed: %v", beginErr))
+				newAPIError = types.NewErrorWithStatusCode(beginErr, types.ErrorCodeInvalidRequest, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
+				break
+			}
+			c.Request = c.Request.WithContext(attemptCtx)
+			c.Set("attempt_id", attemptID)
+			c.Header("X-Newapi-Attempt-Id", attemptID)
+		}
+
 		switch relayFormat {
 		case types.RelayFormatOpenAIRealtime:
 			newAPIError = relay.WssHelper(c, relayInfo)
@@ -273,6 +292,31 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			newAPIError = geminiRelayHandler(c, relayInfo)
 		default:
 			newAPIError = relayHandler(c, relayInfo)
+		}
+
+		if lr != nil {
+			c.Request = c.Request.WithContext(origCtx)
+			var cancelCause lifecycle.CancelCause
+			if attemptCtx != nil && attemptCtx.Err() != nil {
+				if errors.Is(attemptCtx.Err(), context.DeadlineExceeded) {
+					cancelCause = lifecycle.CancelCauseAttemptTimeout
+				} else if c.Request.Context().Err() != nil {
+					cancelCause = lifecycle.CancelCauseClientGone
+				}
+			}
+			statusCode := http.StatusOK
+			if newAPIError != nil {
+				statusCode = newAPIError.StatusCode
+			}
+			upstreamMayExecute := newAPIError != nil && statusCode != http.StatusBadRequest && statusCode != http.StatusUnauthorized
+			lr.EndAttempt(lifecycle.AttemptRecord{
+				ID:                 attemptID,
+				Index:              retryParam.GetRetry(),
+				ChannelID:          channel.Id,
+				StatusCode:         statusCode,
+				CancelCause:        cancelCause,
+				UpstreamMayExecute: upstreamMayExecute,
+			})
 		}
 
 		if newAPIError == nil {
@@ -298,6 +342,17 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		retryLogStr := fmt.Sprintf("重试：%s", strings.Trim(strings.Join(strings.Fields(fmt.Sprint(useChannel)), "->"), "[]"))
 		logger.LogInfo(c, retryLogStr)
 	}
+}
+
+func shouldRetry(c *gin.Context, info *relaycommon.RelayInfo, openaiErr *types.NewAPIError, retryTimes int) bool {
+	if helper.SemanticCommitted(c) {
+		return false
+	}
+	if lr := lifecycle.FromContext(c); lr != nil && lr.SemanticCommitted() {
+		return false
+	}
+	decision := service.DecideRelayRetry(c, openaiErr, retryTimes)
+	return decision.Action == "retry"
 }
 
 // CountClaudeTokens implements Anthropic's token-counting utility endpoint.

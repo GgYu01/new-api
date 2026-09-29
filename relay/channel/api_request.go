@@ -356,6 +356,12 @@ func applyTracingHeaders(headers *http.Header, c *gin.Context, info *common.Rela
 	if ts != "" {
 		headers.Set("tracestate", ts)
 	}
+
+	if attemptID := c.GetString("attempt_id"); attemptID != "" {
+		headers.Set("X-Newapi-Attempt-Id", attemptID)
+		headers.Set("X-Execution-Mode", "managed")
+		headers.Set("X-Managed-By", "new-api")
+	}
 }
 
 func DoApiRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBody io.Reader) (*http.Response, error) {

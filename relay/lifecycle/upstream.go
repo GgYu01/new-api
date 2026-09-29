@@ -1,14 +1,21 @@
 package lifecycle
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 
 	"github.com/QuantumNous/new-api/relaykit/types"
-	"github.com/QuantumNous/new-api/service"
 
 	"github.com/gin-gonic/gin"
 )
+
+// FallbackRelayErrorHandler is registered by the service layer to avoid circular dependencies.
+var FallbackRelayErrorHandler func(ctx context.Context, resp *http.Response, showBody bool) *types.NewAPIError
+
+func SetFallbackRelayErrorHandler(h func(ctx context.Context, resp *http.Response, showBody bool) *types.NewAPIError) {
+	FallbackRelayErrorHandler = h
+}
 
 // HandleNon2xx classifies a complete upstream error response before any
 // semantic commit. The body is drained with a cap and the connection is
@@ -27,5 +34,8 @@ func HandleNon2xx(c *gin.Context, resp *http.Response, showBody bool) *types.New
 		}
 		return apiErr
 	}
-	return service.RelayErrorHandler(c.Request.Context(), resp, showBody)
+	if FallbackRelayErrorHandler != nil {
+		return FallbackRelayErrorHandler(c.Request.Context(), resp, showBody)
+	}
+	return types.NewErrorWithStatusCode(fmt.Errorf("upstream error %d", resp.StatusCode), types.ErrorCodeBadResponseStatusCode, resp.StatusCode)
 }

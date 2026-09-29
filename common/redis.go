@@ -50,6 +50,9 @@ func InitRedisClient() (err error) {
 		SysLog(fmt.Sprintf("Redis connected to %s", opt.Addr))
 		SysLog(fmt.Sprintf("Redis database: %d", opt.DB))
 	}
+	if globalTrafficController != nil {
+		globalTrafficController.SetSharedStore(NewRedisSharedPermitStore(RDB))
+	}
 	return err
 }
 

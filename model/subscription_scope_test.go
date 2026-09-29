@@ -25,7 +25,7 @@ func TestGetChannelSkipsStaleCodexAutoReviewAbility(t *testing.T) {
 	priority := int64(0)
 	require.NoError(t, DB.Create(&Ability{Group: "default", Model: "codex-auto-review", ChannelId: 9800, Enabled: true, Priority: &priority}).Error)
 
-	selected, err := GetChannel("default", "codex-auto-review", 0, "")
+	selected, err := GetChannel("default", "codex-auto-review", 0, nil)
 	require.NoError(t, err)
 	assert.Nil(t, selected)
 }

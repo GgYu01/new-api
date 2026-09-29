@@ -14,9 +14,14 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	taskdto "github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/logger"
+	"github.com/QuantumNous/new-api/relay/lifecycle"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
 )
+
+func init() {
+	lifecycle.SetFallbackRelayErrorHandler(RelayErrorHandler)
+}
 
 func MidjourneyErrorWrapper(code int, desc string) *taskdto.MidjourneyResponse {
 	return &taskdto.MidjourneyResponse{
