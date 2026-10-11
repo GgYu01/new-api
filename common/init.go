@@ -20,6 +20,7 @@ var (
 	PrintVersion = flag.Bool("version", false, "print version and exit")
 	PrintHelp    = flag.Bool("help", false, "print help and exit")
 	LogDir       = flag.String("log-dir", "./logs", "specify the log directory")
+	LogMaxSizeMB = flag.Int("log-max-size-mb", 100, "maximum size in megabytes for log files before rotation/pruning (defaults to LOG_MAX_SIZE_MB env or 100)")
 	ServiceRole  = flag.String("role", "", "service role: all, api, worker (defaults to SERVICE_ROLE/ROLE env or 'all')")
 )
 
@@ -27,11 +28,17 @@ func printHelp() {
 	fmt.Println("NewAPI(Based OneAPI) " + Version + " - The next-generation LLM gateway and AI asset management system supports multiple languages.")
 	fmt.Println("Original Project: OneAPI by JustSong - https://github.com/songquanpeng/one-api")
 	fmt.Println("Maintainer: QuantumNous - https://github.com/QuantumNous/new-api")
-	fmt.Println("Usage: newapi [--port <port>] [--log-dir <log directory>] [--version] [--help]")
+	fmt.Println("Usage: newapi [--port <port>] [--log-dir <log directory>] [--log-max-size-mb <mb>] [--version] [--help]")
 }
 
 func InitEnv() {
 	flag.Parse()
+
+	if envLogMaxSize := os.Getenv("LOG_MAX_SIZE_MB"); envLogMaxSize != "" {
+		if val, err := strconv.Atoi(envLogMaxSize); err == nil && val > 0 {
+			*LogMaxSizeMB = val
+		}
+	}
 
 	// 捕获编译期版本，防止环境变量覆盖导致丢失原始编译信息
 	if CompiledVersion == "" && Version != "" && Version != "v0.0.0" {

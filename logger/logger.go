@@ -7,6 +7,10 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
+	"runtime/debug"
+	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -33,11 +37,135 @@ var setupLogWorking atomic.Bool
 var currentLogPath string
 var currentLogPathMu sync.RWMutex
 var currentLogFile *os.File
+var maxLogSizeMB atomic.Int64
+
+func init() {
+	maxLogSizeMB.Store(100)
+}
+
+func GetMaxLogSizeMB() int {
+	v := maxLogSizeMB.Load()
+	if v <= 0 {
+		if common.LogMaxSizeMB != nil && *common.LogMaxSizeMB > 0 {
+			return *common.LogMaxSizeMB
+		}
+		return 100
+	}
+	return int(v)
+}
+
+func SetMaxLogSizeMB(mb int) {
+	if mb <= 0 {
+		mb = 100
+	}
+	maxLogSizeMB.Store(int64(mb))
+	if common.LogMaxSizeMB != nil {
+		*common.LogMaxSizeMB = mb
+	}
+	gopool.Go(func() {
+		_, _, _ = PruneLogFiles()
+	})
+}
 
 func GetCurrentLogPath() string {
 	currentLogPathMu.RLock()
 	defer currentLogPathMu.RUnlock()
 	return currentLogPath
+}
+
+type logFileMeta struct {
+	path    string
+	size    int64
+	modTime time.Time
+}
+
+var pruneLock sync.Mutex
+
+// PruneLogFiles checks all oneapi-*.log files in common.LogDir and removes oldest
+// inactive files if total size exceeds maxLogSizeMB (default 100MB).
+// The currently active log file is NEVER deleted.
+func PruneLogFiles() (deletedCount int, freedBytes int64, err error) {
+	if !pruneLock.TryLock() {
+		return 0, 0, nil
+	}
+	defer pruneLock.Unlock()
+
+	if common.LogDir == nil || *common.LogDir == "" {
+		return 0, 0, nil
+	}
+	entries, err := os.ReadDir(*common.LogDir)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	activeLog := GetCurrentLogPath()
+	var files []logFileMeta
+	var totalSize int64
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if !strings.HasPrefix(name, "oneapi-") || !strings.HasSuffix(name, ".log") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		p := filepath.Join(*common.LogDir, name)
+		files = append(files, logFileMeta{
+			path:    p,
+			size:    info.Size(),
+			modTime: info.ModTime(),
+		})
+		totalSize += info.Size()
+	}
+
+	maxAllowedBytes := int64(GetMaxLogSizeMB()) * 1024 * 1024
+	if totalSize <= maxAllowedBytes {
+		return 0, 0, nil
+	}
+
+	// Sort files by modification time ascending (oldest first)
+	sort.Slice(files, func(i, j int) bool {
+		return files[i].modTime.Before(files[j].modTime)
+	})
+
+	for _, f := range files {
+		if f.path == activeLog {
+			continue // Preserve currently open active log file
+		}
+		if totalSize <= maxAllowedBytes {
+			break
+		}
+		if removeErr := os.Remove(f.path); removeErr == nil {
+			deletedCount++
+			freedBytes += f.size
+			totalSize -= f.size
+		}
+	}
+	return deletedCount, freedBytes, nil
+}
+
+// StartLogCleaner launches a background maintenance ticker that runs every 5 minutes:
+// prunes stale log files exceeding the size limit and reclaims runtime OS memory.
+func StartLogCleaner(ctx context.Context) {
+	gopool.Go(func() {
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				_, _, _ = PruneLogFiles()
+				runtime.GC()
+				debug.FreeOSMemory()
+			}
+		}
+	})
 }
 
 func SetupLogger() {
@@ -71,6 +199,10 @@ func SetupLogger() {
 			_ = oldFile.Close()
 		}
 		common.LogWriterMu.Unlock()
+
+		gopool.Go(func() {
+			_, _, _ = PruneLogFiles()
+		})
 	}
 }
 
@@ -113,7 +245,26 @@ func logHelper(ctx context.Context, level string, msg string) {
 	}
 	_, _ = fmt.Fprintf(writer, "[%s] %v | %s | %s \n", level, now.Format("2006/01/02 - 15:04:05"), id, msg)
 	common.LogWriterMu.RUnlock()
-	if logCount.Add(1) > maxLogCount && setupLogWorking.CompareAndSwap(false, true) {
+
+	count := logCount.Add(1)
+	shouldRotate := false
+	if count > maxLogCount {
+		shouldRotate = true
+	} else if count%1000 == 0 {
+		currentLogPathMu.RLock()
+		f := currentLogFile
+		currentLogPathMu.RUnlock()
+		if f != nil {
+			if fi, err := f.Stat(); err == nil {
+				maxBytes := int64(GetMaxLogSizeMB()) * 1024 * 1024
+				if fi.Size() >= maxBytes {
+					shouldRotate = true
+				}
+			}
+		}
+	}
+
+	if shouldRotate && setupLogWorking.CompareAndSwap(false, true) {
 		logCount.Store(0)
 		gopool.Go(func() {
 			SetupLogger()

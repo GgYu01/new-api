@@ -187,13 +187,15 @@ type LogFileInfo struct {
 
 // LogFilesResponse 日志文件列表响应
 type LogFilesResponse struct {
-	LogDir     string        `json:"log_dir"`
-	Enabled    bool          `json:"enabled"`
-	FileCount  int           `json:"file_count"`
-	TotalSize  int64         `json:"total_size"`
-	OldestTime *time.Time    `json:"oldest_time,omitempty"`
-	NewestTime *time.Time    `json:"newest_time,omitempty"`
-	Files      []LogFileInfo `json:"files"`
+	LogDir           string        `json:"log_dir"`
+	Enabled          bool          `json:"enabled"`
+	FileCount        int           `json:"file_count"`
+	TotalSize        int64         `json:"total_size"`
+	MaxSizeMB        int           `json:"max_size_mb"`
+	AutoPruneEnabled bool          `json:"auto_prune_enabled"`
+	OldestTime       *time.Time    `json:"oldest_time,omitempty"`
+	NewestTime       *time.Time    `json:"newest_time,omitempty"`
+	Files            []LogFileInfo `json:"files"`
 }
 
 // getLogFiles 读取日志目录中的日志文件列表
@@ -254,11 +256,13 @@ func GetLogFiles(c *gin.Context) {
 		}
 	}
 	resp := LogFilesResponse{
-		LogDir:    *common.LogDir,
-		Enabled:   true,
-		FileCount: len(files),
-		TotalSize: totalSize,
-		Files:     files,
+		LogDir:           *common.LogDir,
+		Enabled:          true,
+		FileCount:        len(files),
+		TotalSize:        totalSize,
+		MaxSizeMB:        logger.GetMaxLogSizeMB(),
+		AutoPruneEnabled: true,
+		Files:            files,
 	}
 	if len(files) > 0 {
 		resp.OldestTime = &oldest
