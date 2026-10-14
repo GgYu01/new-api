@@ -171,6 +171,21 @@ func getPreferredModelOwners(modelNames []string, groups []string) map[string]st
 	return owners
 }
 
+func isOpenAIOwnedModel(modelName string) bool {
+	lower := strings.ToLower(strings.TrimSpace(modelName))
+	return lower == "codex-auto-review" ||
+		lower == "codexautoreview" ||
+		lower == "sol" ||
+		lower == "terra" ||
+		strings.HasPrefix(lower, "gpt-") ||
+		strings.HasPrefix(lower, "chatgpt-") ||
+		strings.HasPrefix(lower, "codex-") ||
+		strings.HasSuffix(lower, "-sol") ||
+		strings.HasSuffix(lower, "-terra") ||
+		strings.Contains(lower, "-sol-") ||
+		strings.Contains(lower, "-terra-")
+}
+
 func buildOpenAIModel(modelName string, ownerByModel map[string]string) dto.OpenAIModels {
 	var oaiModel dto.OpenAIModels
 	if staticModel, ok := openAIModelsMap[modelName]; ok {
@@ -186,9 +201,8 @@ func buildOpenAIModel(modelName string, ownerByModel map[string]string) dto.Open
 	if owner, ok := ownerByModel[modelName]; ok && owner != "" {
 		oaiModel.OwnedBy = owner
 	}
-	// This model is intentionally an OpenAI-supplied model even when a stale
-	// ability row still reports the legacy Codex channel owner.
-	if strings.EqualFold(modelName, "codex-auto-review") {
+	// Ensure OpenAI/Codex/sol/terra models always report "openai" as owner.
+	if isOpenAIOwnedModel(modelName) {
 		oaiModel.OwnedBy = "openai"
 	}
 	oaiModel.SupportedEndpointTypes = model.GetModelSupportEndpointTypes(modelName)
@@ -390,8 +404,13 @@ func EnabledListModels(c *gin.Context) {
 
 func RetrieveModel(c *gin.Context, modelType int) {
 	modelId := c.Param("model")
-	if aiModel, ok := openAIModelsMap[modelId]; ok {
-		if strings.EqualFold(modelId, "codex-auto-review") {
+	aiModel, ok := openAIModelsMap[modelId]
+	if !ok && isOpenAIOwnedModel(modelId) {
+		aiModel = buildOpenAIModel(modelId, nil)
+		ok = true
+	}
+	if ok {
+		if isOpenAIOwnedModel(modelId) {
 			aiModel.OwnedBy = "openai"
 		}
 		allowed := true

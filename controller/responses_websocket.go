@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -113,6 +115,16 @@ func newResponsesWSRequestRunner(c *gin.Context) relay.ResponsesWSRequestRunner 
 }
 
 func ResponsesWebSocket(c *gin.Context) {
+	if accel := strings.TrimSpace(os.Getenv("NEWAPI_LOCAL_ACCELERATOR_URL")); (accel != "" && accel != "-") || os.Getenv("NEWAPI_DISABLE_RESPONSES_WS") == "1" {
+		c.JSON(http.StatusUpgradeRequired, gin.H{
+			"error": types.OpenAIError{
+				Message: "WebSocket upgrade is disabled; please use standard HTTP POST /v1/responses",
+				Type:    "invalid_request_error",
+				Code:    "websocket_disabled",
+			},
+		})
+		return
+	}
 	requestID := c.GetString(common.RequestIdKey)
 	runner := newResponsesWSRequestRunner(c)
 	ws, err := upgrader.Upgrade(c.Writer, c.Request, nil)
