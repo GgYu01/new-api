@@ -21,6 +21,7 @@ import (
 	"github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/relay/imagebridge"
+	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
@@ -809,6 +810,8 @@ func maybeRouteThroughNativeAccelerator(c *gin.Context, req *http.Request, info 
 	path := req.URL.Path
 	isTargetPath := path == "/v1/responses" ||
 		strings.HasSuffix(path, "/v1/responses") ||
+		path == "/v1/responses/compact" ||
+		strings.HasSuffix(path, "/v1/responses/compact") ||
 		path == "/v1/chat/completions" ||
 		strings.HasSuffix(path, "/v1/chat/completions") ||
 		strings.HasPrefix(path, "/v1/images/") ||
@@ -818,7 +821,7 @@ func maybeRouteThroughNativeAccelerator(c *gin.Context, req *http.Request, info 
 	}
 	origTarget := req.URL.String()
 	channelProxy := ""
-	if info != nil {
+	if info != nil && info.ChannelMeta != nil {
 		channelProxy = strings.TrimSpace(info.ChannelSetting.Proxy)
 	}
 	if strings.EqualFold(req.URL.Scheme, "https") || channelProxy != "" {
@@ -840,11 +843,22 @@ func maybeRouteThroughNativeAccelerator(c *gin.Context, req *http.Request, info 
 	if c2aAuth := strings.TrimSpace(os.Getenv("NATIVE_ACCELERATOR_C2A_AUTH")); c2aAuth != "" {
 		req.Header.Set("X-Accelerator-C2a-Auth", c2aAuth)
 	}
+	if cpa2URL := strings.TrimSpace(os.Getenv("NATIVE_ACCELERATOR_CPA2_URL")); cpa2URL != "" {
+		req.Header.Set("X-Accelerator-Cpa2-Url", cpa2URL)
+	}
+	if cpa2Auth := strings.TrimSpace(os.Getenv("NATIVE_ACCELERATOR_CPA2_AUTH")); cpa2Auth != "" {
+		req.Header.Set("X-Accelerator-Cpa2-Auth", cpa2Auth)
+	}
 	if wantsDownstreamSSE(c, info) {
 		req.Header.Set("X-Accelerator-Stream", "true")
 	}
-	if info != nil && info.OriginModelName != "" {
-		req.Header.Set("X-Accelerator-Client-Model", info.OriginModelName)
+	if info != nil {
+		if info.OriginModelName != "" {
+			req.Header.Set("X-Accelerator-Client-Model", info.OriginModelName)
+		}
+		if info.ChannelMeta != nil && info.UpstreamModelName != "" {
+			req.Header.Set("X-Accelerator-Upstream-Model", info.UpstreamModelName)
+		}
 	}
 	if c != nil {
 		if testTtft := strings.TrimSpace(c.GetHeader("X-Accelerator-Test-Ttft-Ms")); testTtft != "" {
@@ -867,11 +881,16 @@ func maybeRouteThroughNativeAccelerator(c *gin.Context, req *http.Request, info 
 }
 
 func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http.Response, error) {
-	proxyURL := info.ChannelSetting.Proxy
+	proxyURL := ""
+	var channelSetting dto.ChannelSettings
+	if info != nil && info.ChannelMeta != nil {
+		proxyURL = info.ChannelSetting.Proxy
+		channelSetting = info.ChannelSetting
+	}
 	if maybeRouteThroughNativeAccelerator(c, req, info) {
 		proxyURL = ""
 	}
-	client, err := service.GetHttpClientWithProxySettings(proxyURL, info.ChannelSetting)
+	client, err := service.GetHttpClientWithProxySettings(proxyURL, channelSetting)
 	if err != nil {
 		return nil, fmt.Errorf("new proxy http client failed: %w", err)
 	}
@@ -882,7 +901,7 @@ func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 	relayClient := *client
 	relayClient.CheckRedirect = keepUpstreamRedirectResponse
 	if common2.DebugEnabled && req != nil && req.URL != nil {
-		policy := service.NormalizeHTTPTransportPolicy(info.ChannelSetting)
+		policy := service.NormalizeHTTPTransportPolicy(channelSetting)
 		logger.LogDebug(c, fmt.Sprintf(
 			"http transport select: host=%s protocol=%s shards=%d policy=%s",
 			req.URL.Host,
