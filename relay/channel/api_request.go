@@ -7,6 +7,8 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
+	"os"
 	"regexp"
 	"strings"
 	"sync"
@@ -678,8 +680,198 @@ func keepUpstreamRedirectResponse(_ *http.Request, _ []*http.Request) error {
 	return http.ErrUseLastResponse
 }
 
+var (
+	nativeAccelLoopbackOnce sync.Once
+	nativeAccelLoopbackAddr string
+)
+
+func ensureNativeAcceleratorTLSBridge() string {
+	nativeAccelLoopbackOnce.Do(func() {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			return
+		}
+		nativeAccelLoopbackAddr = "http://" + ln.Addr().String()
+		srv := &http.Server{
+			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				realURL := strings.TrimSpace(r.Header.Get("X-Real-Upstream-Url"))
+				proxyURL := strings.TrimSpace(r.Header.Get("X-Real-Upstream-Proxy"))
+				bodyBytes, readBodyErr := io.ReadAll(r.Body)
+				_ = r.Body.Close()
+				if readBodyErr != nil {
+					http.Error(w, readBodyErr.Error(), http.StatusBadRequest)
+					return
+				}
+				if realURL == "" {
+					http.Error(w, "missing X-Real-Upstream-Url", http.StatusBadRequest)
+					return
+				}
+				parsedURL, err := url.Parse(realURL)
+				if err != nil {
+					http.Error(w, "invalid X-Real-Upstream-Url", http.StatusBadRequest)
+					return
+				}
+				outReq, err := http.NewRequestWithContext(r.Context(), r.Method, parsedURL.String(), strings.NewReader(string(bodyBytes)))
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadGateway)
+					return
+				}
+				outReq.ContentLength = int64(len(bodyBytes))
+				for k, vv := range r.Header {
+					if strings.EqualFold(k, "X-Real-Upstream-Url") ||
+						strings.EqualFold(k, "X-Real-Upstream-Proxy") ||
+						strings.EqualFold(k, "Accept-Encoding") ||
+						strings.EqualFold(k, "Host") ||
+						strings.EqualFold(k, "Connection") ||
+						strings.EqualFold(k, "Keep-Alive") ||
+						strings.EqualFold(k, "Transfer-Encoding") ||
+						strings.EqualFold(k, "Content-Length") ||
+						strings.EqualFold(k, "Upgrade") {
+						continue
+					}
+					for _, v := range vv {
+						outReq.Header.Add(k, v)
+					}
+				}
+				outReq.Header.Set("Accept-Encoding", "identity")
+				outReq.Host = parsedURL.Host
+				var defaultSetting = (&common.ChannelMeta{}).ChannelSetting
+				client, err := service.GetHttpClientWithProxySettings(proxyURL, defaultSetting)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadGateway)
+					return
+				}
+				relayClient := *client
+				relayClient.CheckRedirect = keepUpstreamRedirectResponse
+				resp, err := relayClient.Do(outReq)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadGateway)
+					return
+				}
+				defer resp.Body.Close()
+				for k, vv := range resp.Header {
+					if strings.EqualFold(k, "Transfer-Encoding") ||
+						strings.EqualFold(k, "Content-Length") ||
+						strings.EqualFold(k, "Connection") ||
+						strings.EqualFold(k, "Keep-Alive") ||
+						strings.EqualFold(k, "Proxy-Authenticate") ||
+						strings.EqualFold(k, "Proxy-Authorization") ||
+						strings.EqualFold(k, "Te") ||
+						strings.EqualFold(k, "Trailer") ||
+						strings.EqualFold(k, "Upgrade") {
+						continue
+					}
+					for _, v := range vv {
+						w.Header().Add(k, v)
+					}
+				}
+				w.WriteHeader(resp.StatusCode)
+				flusher, _ := w.(http.Flusher)
+				if flusher != nil {
+					flusher.Flush()
+				}
+				buf := make([]byte, 8192)
+				for {
+					n, readErr := resp.Body.Read(buf)
+					if n > 0 {
+						if _, writeErr := w.Write(buf[:n]); writeErr != nil {
+							return
+						}
+						if flusher != nil {
+							flusher.Flush()
+						}
+					}
+					if readErr != nil {
+						return
+					}
+				}
+			}),
+		}
+		go func() {
+			_ = srv.Serve(ln)
+		}()
+	})
+	return nativeAccelLoopbackAddr
+}
+
+func maybeRouteThroughNativeAccelerator(c *gin.Context, req *http.Request, info *common.RelayInfo) bool {
+	if req == nil || req.URL == nil || req.Method != http.MethodPost {
+		return false
+	}
+	accelRaw := strings.TrimSpace(os.Getenv("NATIVE_ACCELERATOR_URL"))
+	if accelRaw == "" {
+		return false
+	}
+	accelURL, err := url.Parse(accelRaw)
+	if err != nil || accelURL.Host == "" || req.URL.Host == accelURL.Host {
+		return false
+	}
+	path := req.URL.Path
+	isTargetPath := path == "/v1/responses" ||
+		strings.HasSuffix(path, "/v1/responses") ||
+		path == "/v1/chat/completions" ||
+		strings.HasSuffix(path, "/v1/chat/completions") ||
+		strings.HasPrefix(path, "/v1/images/") ||
+		strings.Contains(path, "/v1/images/")
+	if !isTargetPath {
+		return false
+	}
+	origTarget := req.URL.String()
+	channelProxy := ""
+	if info != nil {
+		channelProxy = strings.TrimSpace(info.ChannelSetting.Proxy)
+	}
+	if strings.EqualFold(req.URL.Scheme, "https") || channelProxy != "" {
+		if bridgeBase := ensureNativeAcceleratorTLSBridge(); bridgeBase != "" {
+			req.Header.Set("X-Real-Upstream-Url", origTarget)
+			if channelProxy != "" {
+				req.Header.Set("X-Real-Upstream-Proxy", channelProxy)
+			}
+			req.Header.Set("X-Accelerator-Target-Url", bridgeBase+req.URL.RequestURI())
+		} else {
+			req.Header.Set("X-Accelerator-Target-Url", origTarget)
+		}
+	} else {
+		req.Header.Set("X-Accelerator-Target-Url", origTarget)
+	}
+	if c2aURL := strings.TrimSpace(os.Getenv("NATIVE_ACCELERATOR_C2A_URL")); c2aURL != "" {
+		req.Header.Set("X-Accelerator-C2a-Url", c2aURL)
+	}
+	if c2aAuth := strings.TrimSpace(os.Getenv("NATIVE_ACCELERATOR_C2A_AUTH")); c2aAuth != "" {
+		req.Header.Set("X-Accelerator-C2a-Auth", c2aAuth)
+	}
+	if wantsDownstreamSSE(c, info) {
+		req.Header.Set("X-Accelerator-Stream", "true")
+	}
+	if info != nil && info.OriginModelName != "" {
+		req.Header.Set("X-Accelerator-Client-Model", info.OriginModelName)
+	}
+	if c != nil {
+		if testTtft := strings.TrimSpace(c.GetHeader("X-Accelerator-Test-Ttft-Ms")); testTtft != "" {
+			req.Header.Set("X-Accelerator-Test-Ttft-Ms", testTtft)
+		}
+		if intent, ok := imagebridge.FromContext(c); ok {
+			req.Header.Set("X-Accelerator-Image-Envelope", string(intent.Envelope))
+			if intent.ClientModel != "" {
+				req.Header.Set("X-Accelerator-Client-Model", intent.ClientModel)
+			}
+			if intent.Stream {
+				req.Header.Set("X-Accelerator-Stream", "true")
+			}
+		}
+	}
+	req.URL.Scheme = accelURL.Scheme
+	req.URL.Host = accelURL.Host
+	req.Host = accelURL.Host
+	return true
+}
+
 func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http.Response, error) {
-	client, err := service.GetHttpClientWithProxySettings(info.ChannelSetting.Proxy, info.ChannelSetting)
+	proxyURL := info.ChannelSetting.Proxy
+	if maybeRouteThroughNativeAccelerator(c, req, info) {
+		proxyURL = ""
+	}
+	client, err := service.GetHttpClientWithProxySettings(proxyURL, info.ChannelSetting)
 	if err != nil {
 		return nil, fmt.Errorf("new proxy http client failed: %w", err)
 	}

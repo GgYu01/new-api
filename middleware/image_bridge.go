@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
+	pluginruntime "github.com/QuantumNous/new-api/pkg/jsplugin"
 	"github.com/QuantumNous/new-api/relay/imagebridge"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/gin-gonic/gin"
@@ -18,6 +19,10 @@ import (
 func DetectImageBridge() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if c.Request == nil || c.Request.Method != http.MethodPost {
+			c.Next()
+			return
+		}
+		if _, exists := c.Get(pluginruntime.ContextKeyPinnedEndpoint); exists {
 			c.Next()
 			return
 		}

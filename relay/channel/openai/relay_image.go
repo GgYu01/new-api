@@ -234,7 +234,7 @@ func OpenaiImageStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp 
 			if service.ValidUsage(&chunk.Usage) {
 				usage = &chunk.Usage
 			}
-			if chunk.Type == "image_generation.completed" || chunk.Type == "image_edit.completed" {
+			if chunk.Type == "image_generation.completed" || chunk.Type == "image_edit.completed" || chunk.Type == "response.image_generation_call.completed" {
 				completedImages++
 			}
 		}
@@ -298,7 +298,9 @@ func isOpenAIImageStreamErrorEvent(data []byte) bool {
 		return false
 	}
 	payloadType := strings.ToLower(strings.TrimSpace(payload.Type))
-	return payloadType == "error" || payloadType == "upstream_error" || len(payload.Error) > 0
+	errRaw := strings.TrimSpace(string(payload.Error))
+	hasErrObj := len(errRaw) > 0 && errRaw != "null"
+	return payloadType == "error" || payloadType == "upstream_error" || hasErrObj
 }
 
 func extractOpenAIImageStreamErrorMessage(data []byte) string {
