@@ -864,6 +864,14 @@ func maybeRouteThroughNativeAccelerator(c *gin.Context, req *http.Request, info 
 		if testTtft := strings.TrimSpace(c.GetHeader("X-Accelerator-Test-Ttft-Ms")); testTtft != "" {
 			req.Header.Set("X-Accelerator-Test-Ttft-Ms", testTtft)
 		}
+		if forceArgon := strings.TrimSpace(c.GetHeader("X-Force-Argon")); forceArgon != "" {
+			req.Header.Set("X-Force-Argon", forceArgon)
+		}
+		for _, hdr := range []string{"X-Session-Id", "session_id", "conversation_id", "X-Codex-Turn-Metadata"} {
+			if val := strings.TrimSpace(c.GetHeader(hdr)); val != "" {
+				req.Header.Set(hdr, val)
+			}
+		}
 		if intent, ok := imagebridge.FromContext(c); ok {
 			req.Header.Set("X-Accelerator-Image-Envelope", string(intent.Envelope))
 			if intent.ClientModel != "" {
