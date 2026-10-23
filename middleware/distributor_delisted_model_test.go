@@ -36,6 +36,8 @@ type distributorDelistedCase struct {
 	forbidMessage     string
 	wantDownstream    int
 	wantChannelID     int
+	// walletOnly sets the user id without seeding any subscription.
+	walletOnly bool
 }
 
 func setupDistributorDelistedFixture(t *testing.T) *gorm.DB {
@@ -153,12 +155,65 @@ func Test_Distribute_respectsDelistedModelPolicyBeforeNoChannel503(t *testing.T)
 			wantDownstream: 0,
 		},
 		{
-			name:           "unscoped_key_denied_stays_403",
-			modelName:      "gpt-5.5",
+			name:             "subscribed_user_unscoped_key_denied_stays_403",
+			modelName:        "grok-4.6",
+			group:            "sub",
+			userID:           43,
+			seedChannelID:    3404,
+			seedChannelModel: "grok-4.6",
+			wantStatus:       http.StatusForbidden,
+			wantErrorCode:    string(types.ErrorCodeModelNotFound),
+			wantMessage:      "The active subscription does not allow model grok-4.6",
+			forbidMessage:    "No available channel",
+			wantDownstream:   0,
+		},
+		{
+			name:             "wallet_only_unscoped_key_any_model_reaches_downstream",
+			modelName:        "claude-opus-5",
+			group:            "default",
+			userID:           77,
+			walletOnly:       true,
+			seedChannelID:    3401,
+			seedChannelModel: "claude-opus-5",
+			wantStatus:       http.StatusOK,
+			wantDownstream:   1,
+			wantChannelID:    3401,
+		},
+		{
+			name:             "wallet_only_grok_scoped_key_can_call_gpt",
+			modelName:        "gpt-5.6-sol",
+			group:            "default",
+			userID:           78,
+			walletOnly:       true,
+			tokenScope:       model.SubscriptionTypeGrok,
+			seedChannelID:    3402,
+			seedChannelModel: "gpt-5.6-sol",
+			wantStatus:       http.StatusOK,
+			wantDownstream:   1,
+			wantChannelID:    3402,
+		},
+		{
+			name:             "wallet_only_gpt_scoped_key_can_call_grok",
+			modelName:        "grok-4.6",
+			group:            "default",
+			userID:           79,
+			walletOnly:       true,
+			tokenScope:       model.SubscriptionTypeGPTOpenAICodex,
+			seedChannelID:    3403,
+			seedChannelModel: "grok-4.6",
+			wantStatus:       http.StatusOK,
+			wantDownstream:   1,
+			wantChannelID:    3403,
+		},
+		{
+			name:           "subscribed_user_grok_key_still_denied_gpt",
+			modelName:      "gpt-5.6-sol",
 			group:          "sub",
+			userID:         44,
+			tokenScope:     model.SubscriptionTypeGrok,
 			wantStatus:     http.StatusForbidden,
 			wantErrorCode:  string(types.ErrorCodeModelNotFound),
-			wantMessage:    "The active subscription does not allow model gpt-5.5",
+			wantMessage:    "The active subscription does not allow model gpt-5.6-sol",
 			forbidMessage:  "No available channel",
 			wantDownstream: 0,
 		},
@@ -216,7 +271,7 @@ func Test_Distribute_respectsDelistedModelPolicyBeforeNoChannel503(t *testing.T)
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			db := setupDistributorDelistedFixture(t)
-			if tc.userID > 0 {
+			if tc.userID > 0 && !tc.walletOnly {
 				seedGrokSubscription(t, db, tc.userID)
 			}
 			if tc.seedChannelID > 0 {

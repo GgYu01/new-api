@@ -432,5 +432,21 @@ func SetApiRouter(router *gin.Engine) {
 			deploymentsRoute.POST("/:id/extend", controller.ExtendDeployment)
 			deploymentsRoute.DELETE("/:id", controller.DeleteDeployment)
 		}
+
+		// Disguise & Mixed-Pool Routing Management (Admin)
+		disguiseRoute := apiRouter.Group("/disguise-routing")
+		disguiseRoute.Use(middleware.DisableCache(), middleware.AdminAuth())
+		{
+			disguiseRoute.GET("/config", controller.GetDisguiseRoutingConfig)
+			disguiseRoute.PUT("/config", controller.UpdateDisguiseRoutingConfig)
+			disguiseRoute.POST("/config", controller.UpdateDisguiseRoutingConfig)
+			disguiseRoute.POST("/reset", controller.ResetDisguiseRoutingConfig)
+			disguiseRoute.POST("/simulate", controller.SimulateDisguiseRouting)
+			disguiseRoute.GET("/ttft-preview", controller.PreviewDisguiseRoutingTTFT)
+			disguiseRoute.POST("/ttft-preview", controller.PreviewDisguiseRoutingTTFT)
+			disguiseRoute.GET("/samples", controller.GetDisguiseCapturedSamples)
+			disguiseRoute.DELETE("/samples", controller.ClearDisguiseCapturedSamples)
+		}
 	}
+	controller.StartDisguiseRoutingSyncLoop()
 }

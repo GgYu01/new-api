@@ -287,6 +287,37 @@ func OpenaiHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Respo
 		return nil, types.WithOpenAIError(*oaiError, resp.StatusCode)
 	}
 
+	hasSubstantiveChoice := false
+	for _, choice := range simpleResponse.Choices {
+		if strings.TrimSpace(choice.Message.StringContent()) != "" ||
+			len(choice.Message.ParseToolCalls()) > 0 ||
+			len(choice.Message.ToolCalls) > 0 {
+			hasSubstantiveChoice = true
+			break
+		}
+	}
+	if !hasSubstantiveChoice && len(simpleResponse.Choices) > 0 {
+		// If upstream only returned reasoning_content without content, salvage reasoning_content into content;
+		// if completely empty, return ErrorCodeEmptyResponse so NewAPI channel retry can recover.
+		salvaged := false
+		for i := range simpleResponse.Choices {
+			rc := strings.TrimSpace(simpleResponse.Choices[i].Message.GetReasoningContent())
+			if rc != "" {
+				simpleResponse.Choices[i].Message.SetStringContent(rc)
+				if patched, pErr := common.Marshal(simpleResponse); pErr == nil {
+					responseBody = patched
+				}
+				salvaged = true
+				break
+			}
+		}
+		if !salvaged {
+			return nil, types.NewOpenAIError(fmt.Errorf("upstream returned empty response content"), types.ErrorCodeEmptyResponse, http.StatusBadGateway)
+		}
+	} else if len(simpleResponse.Choices) == 0 && simpleResponse.Usage.TotalTokens == 0 {
+		return nil, types.NewOpenAIError(fmt.Errorf("upstream returned zero choices"), types.ErrorCodeEmptyResponse, http.StatusBadGateway)
+	}
+
 	info.ObserveResponseModel(simpleResponse.Model)
 	for _, choice := range simpleResponse.Choices {
 		if choice.FinishReason == constant.FinishReasonContentFilter {

@@ -251,6 +251,66 @@ func TestListModelsFiltersByTokenSubscriptionType(t *testing.T) {
 	assert.Equal(t, map[string]struct{}{"grok-4.6": {}}, decodeListModelsResponse(t, recorder))
 }
 
+func TestListModelsWalletOnlyUserIgnoresKeyScope(t *testing.T) {
+	withSelfUseModeEnabled(t)
+	db := setupModelListControllerTestDB(t)
+	require.NoError(t, db.AutoMigrate(&model.UserSubscription{}, &model.SubscriptionPlan{}))
+	require.NoError(t, db.Create(&model.User{Id: 2101, Username: "wallet-only-list", Password: "password", Group: "default", Status: common.UserStatusEnabled}).Error)
+	require.NoError(t, db.Create(&[]model.Ability{
+		{Group: "default", Model: "gpt-5.6-sol", ChannelId: 1, Enabled: true},
+		{Group: "default", Model: "grok-4.6", ChannelId: 1, Enabled: true},
+	}).Error)
+
+	for _, scope := range []string{"", model.SubscriptionTypeGrok, model.SubscriptionTypeGPTOpenAICodex} {
+		recorder := httptest.NewRecorder()
+		ctx, _ := gin.CreateTestContext(recorder)
+		ctx.Request = httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+		ctx.Set("id", 2101)
+		ctx.Set("token_id", 9001)
+		common.SetContextKey(ctx, constant.ContextKeyUserGroup, "default")
+		common.SetContextKey(ctx, constant.ContextKeyTokenGroup, "default")
+		if scope != "" {
+			common.SetContextKey(ctx, constant.ContextKeyTokenSubscriptionType, scope)
+		}
+		ListModels(ctx, constant.ChannelTypeOpenAI)
+		assert.Equal(t, map[string]struct{}{"gpt-5.6-sol": {}, "grok-4.6": {}}, decodeListModelsResponse(t, recorder), "scope=%q", scope)
+	}
+}
+
+func TestListModelsSubscriberStillKeyScoped(t *testing.T) {
+	withSelfUseModeEnabled(t)
+	db := setupModelListControllerTestDB(t)
+	require.NoError(t, db.AutoMigrate(&model.UserSubscription{}, &model.SubscriptionPlan{}))
+	require.NoError(t, db.Create(&model.User{Id: 2102, Username: "subscriber-list", Password: "password", Group: "default", Status: common.UserStatusEnabled}).Error)
+	now := common.GetTimestamp()
+	require.NoError(t, db.Create(&model.UserSubscription{UserId: 2102, PlanId: 1, AmountTotal: 100, Status: "active", StartTime: now - 60, EndTime: now + 3600, SubscriptionType: model.SubscriptionTypeGPTOpenAICodex}).Error)
+	require.NoError(t, db.Create(&model.UserSubscription{UserId: 2102, PlanId: 2, AmountTotal: 100, Status: "active", StartTime: now - 60, EndTime: now + 3600, SubscriptionType: model.SubscriptionTypeGrok}).Error)
+	require.NoError(t, db.Create(&[]model.Ability{
+		{Group: "default", Model: "gpt-5.6-sol", ChannelId: 1, Enabled: true},
+		{Group: "default", Model: "grok-4.6", ChannelId: 1, Enabled: true},
+	}).Error)
+
+	cases := map[string]map[string]struct{}{
+		"":                                   {},
+		model.SubscriptionTypeGrok:           {"grok-4.6": {}},
+		model.SubscriptionTypeGPTOpenAICodex: {"gpt-5.6-sol": {}},
+	}
+	for scope, want := range cases {
+		recorder := httptest.NewRecorder()
+		ctx, _ := gin.CreateTestContext(recorder)
+		ctx.Request = httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+		ctx.Set("id", 2102)
+		ctx.Set("token_id", 9002)
+		common.SetContextKey(ctx, constant.ContextKeyUserGroup, "default")
+		common.SetContextKey(ctx, constant.ContextKeyTokenGroup, "default")
+		if scope != "" {
+			common.SetContextKey(ctx, constant.ContextKeyTokenSubscriptionType, scope)
+		}
+		ListModels(ctx, constant.ChannelTypeOpenAI)
+		assert.Equal(t, want, decodeListModelsResponse(t, recorder), "scope=%q", scope)
+	}
+}
+
 func TestGetUserModelsExpandsAutoGroupsInConfiguredOrder(t *testing.T) {
 	originalAutoGroups := setting.AutoGroups2JsonString()
 	originalUsableGroups := setting.UserUsableGroups2JSONString()

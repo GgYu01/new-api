@@ -32,6 +32,7 @@ import {
   ServerCog,
   Settings,
   ShieldCheck,
+  Shuffle,
   Ticket,
   User,
   Users,
@@ -41,6 +42,7 @@ import { useTranslation } from 'react-i18next'
 
 import type { SidebarData } from '@/components/layout/types'
 import { ROLE } from '@/lib/roles'
+import { useAuthStore } from '@/stores/auth-store'
 
 /**
  * Root navigation groups for the application sidebar.
@@ -50,6 +52,8 @@ import { ROLE } from '@/lib/roles'
  */
 export function useSidebarData(): SidebarData {
   const { t } = useTranslation()
+  const userRole = useAuthStore((s) => s.auth.user?.role ?? ROLE.GUEST)
+  const isAdmin = userRole >= ROLE.ADMIN
 
   return {
     navGroups: [
@@ -169,6 +173,17 @@ export function useSidebarData(): SidebarData {
             icon: PlugZap,
             requiredRole: ROLE.SUPER_ADMIN,
           },
+          ...(isAdmin
+            ? [
+                {
+                  title: '混池与伪装路由',
+                  url: '/system-settings/request-policies/disguise',
+                  activeUrls: ['/system-settings/request-policies/disguise'],
+                  icon: Shuffle,
+                  requiredRole: ROLE.ADMIN,
+                },
+              ]
+            : []),
           {
             title: t('System Settings'),
             url: '/system-settings/site',

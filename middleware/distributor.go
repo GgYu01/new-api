@@ -87,9 +87,13 @@ func Distribute() func(c *gin.Context) {
 		// A user's active subscriptions form a union, while each API key is
 		// bound to one billing scope. Enforce the key scope before selecting a
 		// channel so cross-provider requests cannot consume the other plan.
+		// Wallet-only users (no active subscription) are billed from their
+		// balance and are not restricted by key scope at all.
 		tokenScope := common.GetContextKeyString(c, constant.ContextKeyTokenSubscriptionType)
 		scopeExempt := common.GetContextKeyBool(c, constant.ContextKeyTokenScopeExempt)
-		if tokenScope != "" {
+		if !model.TokenScopeEnforcedForAccess(subscriptionAccess) {
+			// wallet-only user: no key-scope restriction
+		} else if tokenScope != "" {
 			if strings.TrimSpace(modelRequest.Model) == "" && shouldSelectChannel {
 				abortWithOpenAiMessage(c, http.StatusForbidden, i18n.T(c, i18n.MsgDistributorSubscriptionModelRequired), types.ErrorCodeModelNotFound)
 				return

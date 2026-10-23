@@ -34,6 +34,8 @@ import {
 import { useSearch } from '@/context/search-provider'
 import { useTheme } from '@/context/theme-provider'
 import { useSidebarData } from '@/hooks/use-sidebar-data'
+import { ROLE } from '@/lib/roles'
+import { useAuthStore } from '@/stores/auth-store'
 
 import { getNavGroupsForPath } from './layout/lib/sidebar-view-registry'
 import { ScrollArea } from './ui/scroll-area'
@@ -46,9 +48,25 @@ export function CommandMenu() {
   const { pathname } = useLocation()
   const sidebarData = useSidebarData()
 
-  // Use the active nested sidebar view's nav groups when one matches
-  // the current URL; otherwise fall back to the root navigation.
-  const navGroups = getNavGroupsForPath(pathname, t) ?? sidebarData.navGroups
+  const userRole = useAuthStore((s) => s.auth.user?.role ?? ROLE.GUEST)
+  const isAdmin = userRole >= ROLE.ADMIN
+
+  // Use the active nested sidebar view's nav groups only for admins;
+  // filter out admin groups and role-gated items for regular users.
+  const rawGroups = (isAdmin ? getNavGroupsForPath(pathname, t) : null) ?? sidebarData.navGroups
+  const navGroups = React.useMemo(
+    () =>
+      rawGroups
+        .filter((group) => (group.id === 'admin' ? isAdmin : true))
+        .map((group) => ({
+          ...group,
+          items: group.items.filter(
+            (item) => item.requiredRole === undefined || userRole >= item.requiredRole
+          ),
+        }))
+        .filter((group) => group.items.length > 0),
+    [rawGroups, isAdmin, userRole]
+  )
 
   const runCommand = React.useCallback(
     (command: () => unknown) => {

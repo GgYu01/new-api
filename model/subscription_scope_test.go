@@ -228,6 +228,39 @@ func TestBackfillSubscriptionTypesDefaultsLegacyRowsAndKeepsExplicitGrok(t *test
 	assert.True(t, adminToken.ScopeExempt)
 }
 
+// Regression: converting a subscriber into a wallet-only user cleared the key
+// scope, and the next startup backfill disabled every key of that user.
+func TestBackfillSubscriptionTypesKeepsWalletOnlyKeysEnabled(t *testing.T) {
+	truncateTables(t)
+	now := GetDBTimestamp()
+	require.NoError(t, DB.Create(&User{Id: 9740, Username: "wallet-only", Password: "unused", Status: 1, Role: common.RoleCommonUser, Group: "default", AffCode: "wallet-only-aff"}).Error)
+	require.NoError(t, DB.Create(&User{Id: 9741, Username: "ambiguous-sub", Password: "unused", Status: 1, Role: common.RoleCommonUser, Group: "sub", AffCode: "ambiguous-sub-aff"}).Error)
+	require.NoError(t, DB.Create(&Token{Id: 9742, UserId: 9740, Key: "wallet-only-key", Status: common.TokenStatusEnabled}).Error)
+	require.NoError(t, DB.Create(&Token{Id: 9743, UserId: 9741, Key: "ambiguous-key", Status: common.TokenStatusEnabled}).Error)
+	// An expired subscription must not count as an active family.
+	require.NoError(t, DB.Create(&UserSubscription{Id: 9744, UserId: 9740, EndTime: now - 60, Status: "active", SubscriptionType: SubscriptionTypeGPTOpenAICodex}).Error)
+	require.NoError(t, DB.Create(&UserSubscription{Id: 9745, UserId: 9741, EndTime: now + 3600, Status: "active", SubscriptionType: SubscriptionTypeGPTOpenAICodex}).Error)
+	require.NoError(t, DB.Create(&UserSubscription{Id: 9746, UserId: 9741, EndTime: now + 3600, Status: "active", SubscriptionType: SubscriptionTypeGrok}).Error)
+
+	require.NoError(t, BackfillSubscriptionTypes())
+
+	var walletKey Token
+	require.NoError(t, DB.First(&walletKey, 9742).Error)
+	assert.Equal(t, common.TokenStatusEnabled, walletKey.Status)
+	assert.False(t, walletKey.ScopeAssignmentRequired)
+	assert.Empty(t, walletKey.SubscriptionType)
+
+	var ambiguousKey Token
+	require.NoError(t, DB.First(&ambiguousKey, 9743).Error)
+	assert.Equal(t, common.TokenStatusDisabled, ambiguousKey.Status)
+	assert.True(t, ambiguousKey.ScopeAssignmentRequired)
+}
+
+func TestTokenScopeEnforcedOnlyForSubscribers(t *testing.T) {
+	assert.False(t, TokenScopeEnforcedForAccess(SubscriptionAccess{Enforced: false}))
+	assert.True(t, TokenScopeEnforcedForAccess(SubscriptionAccess{Enforced: true, Types: []string{SubscriptionTypeGrok}}))
+}
+
 func TestWalletOverflowDecisionIsScopedToSelectedSubscription(t *testing.T) {
 	truncateTables(t)
 	now := GetDBTimestamp()

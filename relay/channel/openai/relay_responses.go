@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
@@ -34,6 +35,18 @@ func OaiResponsesHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 	}
 	if oaiError := responsesResponse.GetOpenAIError(); oaiError != nil && oaiError.Type != "" {
 		return nil, types.WithOpenAIError(*oaiError, resp.StatusCode)
+	}
+	if len(responsesResponse.Output) > 0 {
+		allReasoningOnly := true
+		for _, out := range responsesResponse.Output {
+			if out.Type != "reasoning" && out.Type != "" {
+				allReasoningOnly = false
+				break
+			}
+		}
+		if allReasoningOnly && strings.TrimSpace(gjson.GetBytes(responseBody, "output_text").String()) == "" {
+			return nil, types.NewOpenAIError(fmt.Errorf("upstream responses returned reasoning-only hollow output"), types.ErrorCodeEmptyResponse, http.StatusBadGateway)
+		}
 	}
 
 	info.ObserveResponseModel(responsesResponse.Model)

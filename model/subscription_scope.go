@@ -199,6 +199,14 @@ func TokenSubscriptionTypeAllowsModel(subscriptionType string, modelName string)
 	return IsModelAllowedBySubscriptionType(typ, modelName)
 }
 
+// TokenScopeEnforcedForAccess reports whether API-key subscription scopes
+// apply to a user. Key scopes only partition subscription entitlements; a
+// wallet-only user (no active subscription) is billed from balance and may use
+// any model with any of their keys, scoped or not.
+func TokenScopeEnforcedForAccess(access SubscriptionAccess) bool {
+	return access.Enforced
+}
+
 func FilterModelsForTokenSubscriptionType(subscriptionType string, modelNames []string) ([]string, error) {
 	typ, err := NormalizeTokenSubscriptionType(subscriptionType)
 	if err != nil {
@@ -430,6 +438,10 @@ func BackfillSubscriptionTypes() error {
 							return err
 						}
 					}
+				} else if len(families) == 0 {
+					// Wallet-only user: an unscoped key is valid and billed
+					// from balance, so it must never be disabled here.
+					continue
 				} else {
 					if err := tx.Model(&Token{}).Where("id = ?", token.Id).Updates(map[string]any{"status": common.TokenStatusDisabled, "scope_assignment_required": true}).Error; err != nil {
 						return err

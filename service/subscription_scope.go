@@ -46,7 +46,10 @@ func CheckSubscriptionModelAccess(c *gin.Context, userId int, modelName string, 
 	}
 	// Intersect the user's active subscription union with the scope carried by
 	// the API key. This keeps GPT and Grok billing independent even when one
-	// user owns both subscriptions.
+	// user owns both subscriptions. Wallet-only users are not key-scoped.
+	if !model.TokenScopeEnforcedForAccess(access) {
+		return nil
+	}
 	if tokenScope := common.GetContextKeyString(c, constant.ContextKeyTokenSubscriptionType); tokenScope != "" &&
 		strings.TrimSpace(modelName) != "" && !model.TokenSubscriptionTypeAllowsModel(tokenScope, modelName) {
 		return model.ErrSubscriptionModelNotAllowed

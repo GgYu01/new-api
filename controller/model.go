@@ -294,7 +294,19 @@ func ListModels(c *gin.Context, modelType int) {
 		}
 		userModelNames = append(userModelNames, modelName)
 	}
+	// Key scopes only apply when the user holds active subscriptions. Without
+	// a known user (legacy/test contexts) keep the strict behavior.
+	tokenScopeEnforced := true
 	if userID := c.GetInt("id"); userID > 0 {
+		access, accessErr := service.SubscriptionAccessForRequest(c, userID)
+		if accessErr != nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{
+				"success": false,
+				"message": accessErr.Error(),
+			})
+			return
+		}
+		tokenScopeEnforced = model.TokenScopeEnforcedForAccess(access)
 		filteredModelNames, subscriptionErr := model.FilterModelsForSubscription(userID, userModelNames)
 		if subscriptionErr != nil {
 			c.JSON(http.StatusServiceUnavailable, gin.H{
@@ -305,7 +317,9 @@ func ListModels(c *gin.Context, modelType int) {
 		}
 		userModelNames = filteredModelNames
 	}
-	if tokenScope := common.GetContextKeyString(c, constant.ContextKeyTokenSubscriptionType); tokenScope != "" {
+	if !tokenScopeEnforced {
+		// wallet-only user: every key sees the full model list
+	} else if tokenScope := common.GetContextKeyString(c, constant.ContextKeyTokenSubscriptionType); tokenScope != "" {
 		filteredModelNames, scopeErr := model.FilterModelsForTokenSubscriptionType(tokenScope, userModelNames)
 		if scopeErr != nil {
 			c.JSON(http.StatusServiceUnavailable, gin.H{"success": false, "message": scopeErr.Error()})
@@ -313,9 +327,9 @@ func ListModels(c *gin.Context, modelType int) {
 		}
 		userModelNames = filteredModelNames
 	} else if c.GetInt("token_id") > 0 && !common.GetContextKeyBool(c, constant.ContextKeyTokenScopeExempt) {
-		// Ordinary authenticated keys must carry an explicit scope. Empty scope
-		// is reserved for an explicit system exemption and must not expose the
-		// user's model union.
+		// Subscribed users' ordinary keys must carry an explicit scope. Empty
+		// scope is reserved for an explicit system exemption and must not
+		// expose the user's model union.
 		userModelNames = []string{}
 	}
 
@@ -414,11 +428,20 @@ func RetrieveModel(c *gin.Context, modelType int) {
 			aiModel.OwnedBy = "openai"
 		}
 		allowed := true
+		tokenScopeEnforced := true
 		var err error
 		if userID := c.GetInt("id"); userID > 0 {
 			allowed, err = model.UserSubscriptionAllowsModel(userID, modelId)
+			if err == nil {
+				access, accessErr := service.SubscriptionAccessForRequest(c, userID)
+				if accessErr != nil {
+					err = accessErr
+				} else {
+					tokenScopeEnforced = model.TokenScopeEnforcedForAccess(access)
+				}
+			}
 		}
-		if allowed {
+		if allowed && tokenScopeEnforced {
 			if tokenScope := common.GetContextKeyString(c, constant.ContextKeyTokenSubscriptionType); tokenScope != "" {
 				allowed = model.TokenSubscriptionTypeAllowsModel(tokenScope, modelId)
 			} else if c.GetInt("token_id") > 0 && !common.GetContextKeyBool(c, constant.ContextKeyTokenScopeExempt) {

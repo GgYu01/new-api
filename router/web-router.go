@@ -22,6 +22,9 @@ type WebAssets struct {
 func SetWebRouter(router *gin.Engine, assets WebAssets, pluginDispatcher gin.HandlerFunc) {
 	frontendFS := common.EmbedFolder(assets.BuildFS, "web/dist")
 
+	router.GET("/admin/disguise-routing", controller.ServeDisguiseRoutingAdminPage)
+	router.GET("/disguise-routing", controller.ServeDisguiseRoutingAdminPage)
+
 	router.NoRoute(
 		pluginDispatcher,
 		middleware.RouteTag("web"),
