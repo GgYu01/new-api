@@ -17,7 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { AlertTriangle } from 'lucide-react'
-import { lazy, Suspense, useState } from 'react'
+import { Suspense, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { Dialog } from '@/components/dialog'
@@ -25,12 +25,7 @@ import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-
-const Markdown = lazy(() =>
-  import('@/components/ui/markdown').then((module) => ({
-    default: module.Markdown,
-  }))
-)
+import { Markdown } from '@/components/ui/markdown'
 
 interface StatusCodeRiskDialogProps {
   open: boolean

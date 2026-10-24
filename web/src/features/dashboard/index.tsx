@@ -18,7 +18,7 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { getRouteApi, useNavigate } from '@tanstack/react-router'
 import { Eye, EyeOff } from 'lucide-react'
-import { useState, useCallback, useMemo, lazy, Suspense } from 'react'
+import { useState, useCallback, useMemo, Suspense } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { SectionPageLayout } from '@/components/layout'
@@ -35,9 +35,15 @@ import { ROLE } from '@/lib/roles'
 import { cn } from '@/lib/utils'
 import { useAuthStore } from '@/stores/auth-store'
 
+import { FlowCharts as LazyFlowCharts } from './components/flow/flow-charts'
+import { ConsumptionDistributionChart as LazyConsumptionDistributionChart } from './components/models/consumption-distribution-chart'
+import { LogStatCards as LazyLogStatCards } from './components/models/log-stat-cards'
+import { ModelCharts as LazyModelCharts } from './components/models/model-charts'
 import { ModelsChartPreferences } from './components/models/models-chart-preferences'
 import { ModelsFilter } from './components/models/models-filter-dialog'
+import { PerformanceOverview as LazyPerformanceOverview } from './components/models/performance-overview'
 import { OverviewDashboard } from './components/overview/overview-dashboard'
+import { UserCharts as LazyUserCharts } from './components/users/user-charts'
 import { DEFAULT_TIME_GRANULARITY } from './constants'
 import {
   buildDefaultDashboardFilters,
@@ -76,42 +82,6 @@ const PERFORMANCE_MODEL_FALLBACK_KEYS = [
   'primary-model',
   'secondary-model',
 ] as const
-
-const LazyLogStatCards = lazy(() =>
-  import('./components/models/log-stat-cards').then((m) => ({
-    default: m.LogStatCards,
-  }))
-)
-
-const LazyModelCharts = lazy(() =>
-  import('./components/models/model-charts').then((m) => ({
-    default: m.ModelCharts,
-  }))
-)
-
-const LazyConsumptionDistributionChart = lazy(() =>
-  import('./components/models/consumption-distribution-chart').then((m) => ({
-    default: m.ConsumptionDistributionChart,
-  }))
-)
-
-const LazyPerformanceOverview = lazy(() =>
-  import('./components/models/performance-overview').then((m) => ({
-    default: m.PerformanceOverview,
-  }))
-)
-
-const LazyUserCharts = lazy(() =>
-  import('./components/users/user-charts').then((m) => ({
-    default: m.UserCharts,
-  }))
-)
-
-const LazyFlowCharts = lazy(() =>
-  import('./components/flow/flow-charts').then((m) => ({
-    default: m.FlowCharts,
-  }))
-)
 
 function LogStatCardsFallback() {
   return (

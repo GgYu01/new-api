@@ -80,6 +80,18 @@ func GetDisguiseRoutingConfig(c *gin.Context) {
 	StartDisguiseRoutingSyncLoop()
 	syncDisguiseConfigFromOptionMapIfNeeded()
 
+	// If an older cached browser bundle (pre-r13.14) calls GET /api/disguise-routing/config
+	// without ?v=r1314, purge its HTTP disk cache and prevent AxiosResponse.config crash.
+	if strings.EqualFold(c.GetHeader("Sec-Fetch-Mode"), "cors") && strings.TrimSpace(c.Query("v")) == "" {
+		c.Header("Clear-Site-Data", `"cache"`)
+		c.Header("Cache-Control", "no-store, no-cache, must-revalidate")
+		c.JSON(http.StatusConflict, gin.H{
+			"success": false,
+			"message": "前端缓存已自动刷新，请按 Ctrl+F5 或点击页面刷新按钮加载最新控制台",
+		})
+		return
+	}
+
 	client := &http.Client{Timeout: 8 * time.Second}
 	resp, err := client.Get(acceleratorAdminBaseURL() + "/__accelerator/routing-config")
 	if err != nil {

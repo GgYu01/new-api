@@ -528,7 +528,7 @@ function DisguiseRoutingSectionInner() {
         success: boolean
         config?: DisguiseRoutingConfig
         message?: string
-      }>('/api/disguise-routing/config')
+      }>('/api/disguise-routing/config?v=r1314')
       const payload = unwrapApiPayload<{
         success?: boolean
         config?: DisguiseRoutingConfig

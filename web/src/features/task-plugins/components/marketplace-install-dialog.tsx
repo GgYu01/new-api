@@ -18,7 +18,7 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { AlertTriangle, Download } from 'lucide-react'
-import { lazy, Suspense, useState } from 'react'
+import { Suspense, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
@@ -49,15 +49,10 @@ import {
 import type { MarketplacePlugin, MarketplaceSource } from '../types'
 import { JavaScriptViewer } from './javascript-viewer'
 import { MarketplaceCapabilities } from './marketplace-capabilities'
+import { PluginChangelogPanel } from './plugin-changelog-panel'
 import { PluginIcon } from './plugin-icon'
 import { PluginIntegrityCheck } from './plugin-integrity-check'
 import { SourceDiff } from './source-diff'
-
-const PluginChangelogPanel = lazy(() =>
-  import('./plugin-changelog-panel').then((module) => ({
-    default: module.PluginChangelogPanel,
-  }))
-)
 
 export type MarketplaceInstallTarget = {
   source: MarketplaceSource

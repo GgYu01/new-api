@@ -16,13 +16,14 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { lazy, Suspense, type ReactElement } from 'react'
+import { Suspense, type ReactElement } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { Dialog } from '@/components/dialog'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { Markdown as ReleaseMarkdown } from '@/components/ui/markdown'
 import { Skeleton } from '@/components/ui/skeleton'
 import { formatTimestampToDate } from '@/lib/format'
 
@@ -31,12 +32,6 @@ import {
   getUpdateErrorMessage,
   type useSystemUpdate,
 } from './use-system-update'
-
-const ReleaseMarkdown = lazy(() =>
-  import('@/components/ui/markdown').then((module) => ({
-    default: module.Markdown,
-  }))
-)
 
 type SystemUpdateDialogProps = {
   open: boolean

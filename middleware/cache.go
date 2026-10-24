@@ -6,8 +6,26 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+const CurrentFrontendCacheEpoch = "r1314-clean"
+
+func applyCacheEpochPurgeIfNeeded(c *gin.Context) {
+	cookieVal, err := c.Cookie("newapi_cache_epoch")
+	if err != nil || cookieVal != CurrentFrontendCacheEpoch {
+		c.SetCookie("newapi_cache_epoch", CurrentFrontendCacheEpoch, 365*24*3600, "/", "", false, false)
+		c.Header("Clear-Site-Data", `"cache"`)
+	}
+}
+
+func CacheEpochPurge() func(c *gin.Context) {
+	return func(c *gin.Context) {
+		applyCacheEpochPurgeIfNeeded(c)
+		c.Next()
+	}
+}
+
 func Cache() func(c *gin.Context) {
 	return func(c *gin.Context) {
+		applyCacheEpochPurgeIfNeeded(c)
 		uri := c.Request.RequestURI
 		if strings.HasPrefix(uri, "/static/") || strings.HasPrefix(uri, "/assets/") {
 			c.Header("Cache-Control", "public, max-age=604800")
@@ -16,7 +34,7 @@ func Cache() func(c *gin.Context) {
 			c.Header("Pragma", "no-cache")
 			c.Header("Expires", "0")
 		}
-		c.Header("Cache-Version", "r13.13-20261024-clean")
+		c.Header("Cache-Version", "r13.14-20261024-clean")
 		c.Next()
 	}
 }

@@ -16,7 +16,8 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { useNavigate, useRouter } from '@tanstack/react-router'
+import { useRouter } from '@tanstack/react-router'
+import { useEffect } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { Button } from '@/components/ui/button'
@@ -37,16 +38,46 @@ function getHttpStatus(error: unknown): number | undefined {
   return typeof status === 'number' ? status : undefined
 }
 
+function isStaleChunkOrAssetError(error: unknown): boolean {
+  if (!error) return false
+  const msg =
+    error instanceof Error
+      ? `${error.name} ${error.message}`
+      : String(error ?? '')
+  return (
+    msg.includes('ChunkLoadError') ||
+    msg.includes('Loading chunk') ||
+    msg.includes('Loading CSS chunk') ||
+    msg.includes('Failed to fetch dynamically imported module') ||
+    msg.includes('Importing a module script failed')
+  )
+}
+
 export function GeneralError({
   className,
   minimal = false,
   error,
 }: GeneralErrorProps) {
   const { t } = useTranslation()
-  const navigate = useNavigate()
   const { history } = useRouter()
   const status = getHttpStatus(error)
   const isRateLimited = status === 429
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    if (!isStaleChunkOrAssetError(error)) return
+    try {
+      const key = '__newapi_error_boundary_reload__'
+      const last = Number(window.sessionStorage.getItem(key) || '0')
+      if (Date.now() - last > 5000) {
+        window.sessionStorage.setItem(key, String(Date.now()))
+        window.location.reload()
+      }
+    } catch {
+      window.location.reload()
+    }
+  }, [error])
+
   const title = isRateLimited
     ? t('Too many requests')
     : `${t('Oops! Something went wrong')} ${`:')`}`
@@ -78,6 +109,14 @@ export function GeneralError({
             </Button>
             <Button
               variant='outline'
+              onClick={() => {
+                window.location.reload()
+              }}
+            >
+              {t('Refresh', { defaultValue: '刷新页面' })}
+            </Button>
+            <Button
+              variant='outline'
               render={
                 <a
                   href={FEEDBACK_URL}
@@ -88,7 +127,11 @@ export function GeneralError({
             >
               {t('Report an issue')}
             </Button>
-            <Button onClick={() => navigate({ to: '/' })}>
+            <Button
+              onClick={() => {
+                window.location.href = '/'
+              }}
+            >
               {t('Back to Home')}
             </Button>
           </div>
