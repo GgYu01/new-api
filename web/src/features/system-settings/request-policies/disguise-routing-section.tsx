@@ -101,6 +101,10 @@ interface TtftDistributionConfig {
   tail_max_ms: number
   tail_probability_pct: number
   spread_randomness: number
+  first_event_timeout_secs?: number
+  large_context_first_event_timeout_secs?: number
+  chunk_idle_timeout_secs?: number
+  max_upstream_attempts?: number
 }
 
 interface DisguiseRoutingConfig {
@@ -178,6 +182,10 @@ const DEFAULT_TTFT_CONFIG: TtftDistributionConfig = {
   tail_max_ms: 12000,
   tail_probability_pct: 5,
   spread_randomness: 68,
+  first_event_timeout_secs: 32,
+  large_context_first_event_timeout_secs: 55,
+  chunk_idle_timeout_secs: 45,
+  max_upstream_attempts: 6,
 }
 
 function computeLocalTtftPreview(
@@ -524,7 +532,7 @@ function DisguiseRoutingSectionInner() {
         success: boolean
         config?: DisguiseRoutingConfig
         message?: string
-      }>('/api/disguise-routing/config?v=r1315')
+      }>('/api/disguise-routing/config?v=r1316')
       const payload = unwrapApiPayload<{
         success?: boolean
         config?: DisguiseRoutingConfig
@@ -592,9 +600,19 @@ function DisguiseRoutingSectionInner() {
   const applyTtftPreset = (preset: 'fast_core' | 'snappy' | 'deep_think') => {
     if (!config) return
     setServerPreview(null)
-    let next: TtftDistributionConfig = { ...DEFAULT_TTFT_CONFIG, preset }
+    const prev = config.ttft ?? config.ttft_distribution ?? DEFAULT_TTFT_CONFIG
+    let next: TtftDistributionConfig = {
+      ...DEFAULT_TTFT_CONFIG,
+      first_event_timeout_secs: prev.first_event_timeout_secs ?? 32,
+      large_context_first_event_timeout_secs:
+        prev.large_context_first_event_timeout_secs ?? 55,
+      chunk_idle_timeout_secs: prev.chunk_idle_timeout_secs ?? 45,
+      max_upstream_attempts: prev.max_upstream_attempts ?? 6,
+      preset,
+    }
     if (preset === 'snappy') {
       next = {
+        ...next,
         enabled: true,
         preset: 'snappy',
         min_ms: 900,
@@ -607,6 +625,7 @@ function DisguiseRoutingSectionInner() {
       }
     } else if (preset === 'deep_think') {
       next = {
+        ...next,
         enabled: true,
         preset: 'deep_think',
         min_ms: 1500,
@@ -1268,6 +1287,96 @@ function DisguiseRoutingSectionInner() {
                     </div>
                     <p className='mt-1 text-[11px] text-muted-foreground'>
                       自动按随机 Dirichlet 权重混合「偏移对数正态 + 五阶伽马 + 威布尔」三种分布并注入微秒级抖动，数值越高越难被逆向统计。
+                    </p>
+                  </div>
+
+                  <div className='rounded-lg border border-amber-500/35 bg-background p-3 space-y-2'>
+                    <div className='flex items-center justify-between text-xs font-medium'>
+                      <span>⑥ 后台单次尝试首字实质超时 &amp; 自动切号重试配置</span>
+                      <span className='font-mono text-amber-600 font-semibold'>
+                        常规 {ttft.first_event_timeout_secs ?? 32}s · 长文{' '}
+                        {ttft.large_context_first_event_timeout_secs ?? 55}s · 重试{' '}
+                        {ttft.max_upstream_attempts ?? 6}次
+                      </span>
+                    </div>
+                    <div className='grid grid-cols-2 gap-2 sm:grid-cols-4'>
+                      <div>
+                        <label className='text-[11px] text-muted-foreground'>
+                          常规首字超时 (秒)
+                        </label>
+                        <Input
+                          type='number'
+                          min={10}
+                          max={180}
+                          value={ttft.first_event_timeout_secs ?? 32}
+                          onChange={(e) =>
+                            updateTtftField(
+                              'first_event_timeout_secs',
+                              Number(e.target.value)
+                            )
+                          }
+                          className='h-7 text-xs font-mono'
+                        />
+                      </div>
+                      <div>
+                        <label className='text-[11px] text-muted-foreground'>
+                          长上下文首字 (秒)
+                        </label>
+                        <Input
+                          type='number'
+                          min={20}
+                          max={240}
+                          value={
+                            ttft.large_context_first_event_timeout_secs ?? 55
+                          }
+                          onChange={(e) =>
+                            updateTtftField(
+                              'large_context_first_event_timeout_secs',
+                              Number(e.target.value)
+                            )
+                          }
+                          className='h-7 text-xs font-mono'
+                        />
+                      </div>
+                      <div>
+                        <label className='text-[11px] text-muted-foreground'>
+                          流分片空闲超时 (秒)
+                        </label>
+                        <Input
+                          type='number'
+                          min={15}
+                          max={180}
+                          value={ttft.chunk_idle_timeout_secs ?? 45}
+                          onChange={(e) =>
+                            updateTtftField(
+                              'chunk_idle_timeout_secs',
+                              Number(e.target.value)
+                            )
+                          }
+                          className='h-7 text-xs font-mono'
+                        />
+                      </div>
+                      <div>
+                        <label className='text-[11px] text-muted-foreground'>
+                          无感切号重试次数
+                        </label>
+                        <Input
+                          type='number'
+                          min={1}
+                          max={14}
+                          value={ttft.max_upstream_attempts ?? 6}
+                          onChange={(e) =>
+                            updateTtftField(
+                              'max_upstream_attempts',
+                              Number(e.target.value)
+                            )
+                          }
+                          className='h-7 text-xs font-mono'
+                        />
+                      </div>
+                    </div>
+                    <p className='text-[11px] text-muted-foreground'>
+                      客户端在约 2.5s 已收到伪装首包并处于保活状态；后台等待上游真实吐出首个推理/正文分片超过此秒数时，将<strong>对客户端完全无感地自动破除死号粘性并切换下一优先级渠道重试</strong>（请求体 ≥64KB 自动使用长上下文超时）。
                     </p>
                   </div>
                 </div>

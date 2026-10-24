@@ -95,7 +95,7 @@ api.interceptors.response.use(
       if (
         typeof serverVersion === 'string' &&
         serverVersion.length > 0 &&
-        serverVersion !== 'v1.0.0-r13.15'
+        serverVersion !== 'v1.0.0-r13.16'
       ) {
         try {
           const reloadKey = `__newapi_ver_sync_${serverVersion}__`

@@ -6,7 +6,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-const CurrentFrontendCacheEpoch = "r1315-clean"
+const CurrentFrontendCacheEpoch = "r1316-clean"
 
 func applyCacheEpochPurgeIfNeeded(c *gin.Context) {
 	cookieVal, err := c.Cookie("newapi_cache_epoch")
@@ -36,7 +36,7 @@ func Cache() func(c *gin.Context) {
 			c.Header("Pragma", "no-cache")
 			c.Header("Expires", "0")
 		}
-		c.Header("Cache-Version", "r13.15-20261024-clean")
+		c.Header("Cache-Version", "r13.16-20261024-clean")
 		c.Next()
 	}
 }

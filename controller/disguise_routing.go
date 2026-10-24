@@ -411,6 +411,16 @@ const disguiseAdminHTML = `<!DOCTYPE html>
           <input id="rng_spread" type="range" min="10" max="100" step="2" oninput="onTtftInput('spread_randomness', this.value)" />
           <div class="control-sub">越高则三种数学分布混合跨度越宽、越难被统计学指纹识别</div>
         </div>
+        <div class="control-box">
+          <div class="control-head"><span>后台单次尝试首字实质超时 &amp; 自动切号重试配置</span><span id="lbl_upstream_timeouts">常规 32s / 长上下文 55s / 重试 6次</span></div>
+          <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;">
+            <div><label style="font-size:11px;color:var(--muted);">常规首字超时(s)</label><input id="num_first_event_timeout_secs" type="number" min="10" max="180" style="width:100%" onchange="onTtftInput('first_event_timeout_secs', this.value)" /></div>
+            <div><label style="font-size:11px;color:var(--muted);">长文首字超时(s)</label><input id="num_large_context_first_event_timeout_secs" type="number" min="20" max="240" style="width:100%" onchange="onTtftInput('large_context_first_event_timeout_secs', this.value)" /></div>
+            <div><label style="font-size:11px;color:var(--muted);">分片空闲超时(s)</label><input id="num_chunk_idle_timeout_secs" type="number" min="15" max="180" style="width:100%" onchange="onTtftInput('chunk_idle_timeout_secs', this.value)" /></div>
+            <div><label style="font-size:11px;color:var(--muted);">无感切号次数</label><input id="num_max_upstream_attempts" type="number" min="1" max="14" style="width:100%" onchange="onTtftInput('max_upstream_attempts', this.value)" /></div>
+          </div>
+          <div class="control-sub">超过此秒数未收到真实首字分片时，后台对用户无感地自动破除死号粘性并切换下一渠道重试</div>
+        </div>
       </div>
 
       <div style="display:flex;flex-direction:column;justify-content:space-between;gap:12px;">
@@ -486,6 +496,15 @@ function renderControls() {
   document.getElementById('lbl_tail_ms').textContent = '常规 ' + (t.normal_max_ms/1000).toFixed(1) + 's / 长尾 ' + (t.tail_max_ms/1000).toFixed(1) + 's (' + t.tail_probability_pct + '%)';
   document.getElementById('rng_spread').value = t.spread_randomness;
   document.getElementById('lbl_spread').textContent = t.spread_randomness + '%';
+  const fe = t.first_event_timeout_secs || 32;
+  const lfe = t.large_context_first_event_timeout_secs || 55;
+  const ci = t.chunk_idle_timeout_secs || 45;
+  const ma = t.max_upstream_attempts || 6;
+  document.getElementById('num_first_event_timeout_secs').value = fe;
+  document.getElementById('num_large_context_first_event_timeout_secs').value = lfe;
+  document.getElementById('num_chunk_idle_timeout_secs').value = ci;
+  document.getElementById('num_max_upstream_attempts').value = ma;
+  document.getElementById('lbl_upstream_timeouts').textContent = '常规 ' + fe + 's / 长上下文 ' + lfe + 's / 重试 ' + ma + '次';
 
   const box = document.getElementById('rulesSimpleContainer');
   box.innerHTML = (currentConfig.rules || []).map((r, idx) => {
