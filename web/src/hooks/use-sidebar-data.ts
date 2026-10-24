@@ -176,7 +176,7 @@ export function useSidebarData(): SidebarData {
           ...(isAdmin
             ? [
                 {
-                  title: '混池与伪装路由',
+                  title: '伪装与混池路由 (TTFT)',
                   url: '/system-settings/request-policies/disguise',
                   activeUrls: ['/system-settings/request-policies/disguise'],
                   icon: Shuffle,

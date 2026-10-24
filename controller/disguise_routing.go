@@ -347,6 +347,7 @@ const disguiseAdminHTML = `<!DOCTYPE html>
     <div style="font-size:12px;color:var(--muted);margin-top:2px;">三重数学分布随机叠加 (Log-Normal + Erlang/Gamma + Weibull) · 空回复自动自愈 · CPA1 全量直通优先</div>
   </div>
   <div style="display:flex;gap:8px;align-items:center;">
+    <a href="/system-settings/request-policies/disguise" style="background:#334155;color:#fff;text-decoration:none;padding:8px 12px;border-radius:8px;font-size:13px;font-weight:600;">📋 返回管理员后台菜单页</a>
     <input id="adminTokenInput" type="password" placeholder="Admin Token (若已登录可留空)" style="width:200px;" />
     <input id="adminUserIdInput" type="text" placeholder="User-Id (如 1)" style="width:90px;" />
     <button class="secondary" onclick="loadAll()">🔄 刷新</button>
