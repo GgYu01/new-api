@@ -85,6 +85,30 @@ function redirectToSignIn(): void {
 
 api.interceptors.response.use(
   (response) => {
+    if (typeof window !== 'undefined') {
+      const serverVersion =
+        response.headers?.['x-new-api-version'] ||
+        (response.config.url === '/api/status'
+          ? (response.data as { data?: { version?: string } } | undefined)?.data
+              ?.version
+          : undefined)
+      if (
+        typeof serverVersion === 'string' &&
+        serverVersion.length > 0 &&
+        serverVersion !== 'v1.0.0-r13.15'
+      ) {
+        try {
+          const reloadKey = `__newapi_ver_sync_${serverVersion}__`
+          if (!window.sessionStorage.getItem(reloadKey)) {
+            window.sessionStorage.setItem(reloadKey, '1')
+            window.location.reload()
+          }
+        } catch {
+          // ignore storage errors
+        }
+      }
+    }
+
     if (response.config.acceptAuthRotation && response.data?.success === true) {
       applyAuthRotation(response.data.data)
     }

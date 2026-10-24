@@ -511,11 +511,7 @@ function DisguiseRoutingSectionInner() {
     null
   )
 
-  // Simulation & Captured Samples
-  const [simModel, setSimModel] = useState('gpt-6.1-sol')
-  const [simEffort, setSimEffort] = useState('xhigh')
-  const [simForceArgon, setSimForceArgon] = useState(false)
-  const [simOutput, setSimOutput] = useState<string>('')
+  // Captured Live Production Request Samples
   const [samples, setSamples] = useState<CapturedSample[]>([])
   const [selectedSampleIdx, setSelectedSampleIdx] = useState<number | null>(
     null
@@ -528,7 +524,7 @@ function DisguiseRoutingSectionInner() {
         success: boolean
         config?: DisguiseRoutingConfig
         message?: string
-      }>('/api/disguise-routing/config?v=r1314')
+      }>('/api/disguise-routing/config?v=r1315')
       const payload = unwrapApiPayload<{
         success?: boolean
         config?: DisguiseRoutingConfig
@@ -899,62 +895,6 @@ function DisguiseRoutingSectionInner() {
     setConfig({ ...config, pools: nextPools })
   }
 
-  const runSimulation = async (batchCount = 1) => {
-    try {
-      if (batchCount <= 1) {
-        const res = await api.post<{
-          success: boolean
-          plan?: Record<string, unknown>
-        }>('/api/disguise-routing/simulate', {
-          model: simModel.trim(),
-          effort: simEffort,
-          session_id: `sim_${Date.now()}`,
-          force_argon: simForceArgon,
-        })
-        const payload = unwrapApiPayload<{
-          success?: boolean
-          plan?: Record<string, unknown>
-        }>(res)
-        if (payload?.plan) {
-          const p = payload.plan
-          setSimOutput(
-            `命中规则: ${String(p.matched_rule_name)} (${String(p.matched_rule_id)}) | 选定目标池: ${String(p.selected_pool_id)} | 上游模型: ${String(p.upstream_model)} (effort=${String(p.upstream_effort)}${p.thinking_budget ? `, budget=${String(p.thinking_budget)}` : ''}) | 伪装开启: ${p.disguise_enabled ? '✅ 是 (身份注入+痕迹抹除)' : '⚡ 否 (CPA1 原生直连)'}`
-          )
-        }
-      } else {
-        const counts: Record<string, number> = {}
-        for (let i = 0; i < batchCount; i++) {
-          const res = await api.post<{
-            success: boolean
-            plan?: Record<string, unknown>
-          }>('/api/disguise-routing/simulate', {
-            model: simModel.trim(),
-            effort: simEffort,
-            session_id: `batch_${Date.now()}_${i}_${Math.random()}`,
-            force_argon: simForceArgon,
-          })
-          const payload = unwrapApiPayload<{
-            success?: boolean
-            plan?: Record<string, unknown>
-          }>(res)
-          if (payload?.plan) {
-            const k = `${String(payload.plan.selected_pool_id)} -> ${String(payload.plan.upstream_model)} (${payload.plan.disguise_enabled ? '伪装' : '原生'})`
-            counts[k] = (counts[k] ?? 0) + 1
-          }
-        }
-        const summary = Object.entries(counts)
-          .map(
-            ([k, c]) =>
-              `${k}: ${c}/${batchCount} (${Math.round((c / batchCount) * 100)}%)`
-          )
-          .join('  |  ')
-        setSimOutput(`📊 ${batchCount} 次独立新会话抽样统计: ${summary}`)
-      }
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : '仿真失败')
-    }
-  }
-
   if (!isAdmin) return null
 
   const anyMixEnabled = Boolean(
@@ -1044,7 +984,7 @@ function DisguiseRoutingSectionInner() {
             { id: 'ttft', label: '🎲 1. TTFT 首字延迟伪装调节器' },
             { id: 'rules', label: '🎭 2. 模型伪装与混池分流规则' },
             { id: 'pools', label: '🌐 3. 上游号池配置 (CPA1 / CPA2)' },
-            { id: 'diag', label: '🔍 4. 路由仿真测试与请求抓包' },
+            { id: 'diag', label: '📡 4. 线上实时流量与伪装审计' },
           ] as const
         ).map((tab) => (
           <Button
@@ -1373,7 +1313,7 @@ function DisguiseRoutingSectionInner() {
                   <div className='rounded-lg border bg-background p-3'>
                     <div className='mb-2 flex flex-wrap items-center justify-between gap-2 text-xs'>
                       <span className='font-medium'>
-                        📊 实时概率分布预览图 (1200 次请求仿真统计)
+                        📊 当前延迟参数概率分布直方图 (1200 次采样预览)
                       </span>
                       <div className='flex items-center gap-2'>
                         <span className='inline-flex items-center gap-1 text-[11px] text-muted-foreground'>
@@ -2330,89 +2270,98 @@ function DisguiseRoutingSectionInner() {
           )}
 
           {/* =====================================================================
-              MODULE 4: Route Simulator & Captured Request Samples
+              MODULE 4: Live Production Traffic Monitor & Disguise Audit
              ===================================================================== */}
           {(activeTab === 'all' || activeTab === 'diag') && (
             <div className='rounded-xl border bg-muted/15 p-4 space-y-4'>
               <div>
                 <h4 className='text-sm font-semibold'>
-                  🔍 4. 路由命中仿真测试器与实时请求抓包对比
+                  📡 4. 线上实时流量监控与请求伪装审计
                 </h4>
                 <p className='text-xs text-muted-foreground'>
-                  无需消耗外部上游配额即可验证任意模型与思考强度的路由去向，或查看最近真实请求的伪装改写前后对比。
+                  实时展示正式环境最近进入网关的真实请求路由去向、主备池命中分布，以及真实请求伪装改写前后的脱敏报文对比，便于线上生产排障与规则生效核验。
                 </p>
               </div>
 
-              <div className='flex flex-wrap items-end gap-2.5 rounded-lg border bg-background p-3'>
-                <div>
-                  <label className='text-[11px] text-muted-foreground'>
-                    测试下游模型名
-                  </label>
-                  <Input
-                    value={simModel}
-                    onChange={(e) => setSimModel(e.target.value)}
-                    className='h-8 w-44 text-xs font-mono'
-                  />
-                </div>
-                <div>
-                  <label className='text-[11px] text-muted-foreground'>
-                    思考强度 (effort)
-                  </label>
-                  <select
-                    className='flex h-8 rounded-md border border-input bg-background px-2 text-xs font-mono'
-                    value={simEffort}
-                    onChange={(e) => setSimEffort(e.target.value)}
-                  >
-                    {[
-                      'none',
-                      'minimal',
-                      'low',
-                      'medium',
-                      'high',
-                      'xhigh',
-                      'max',
-                    ].map((ef) => (
-                      <option key={ef} value={ef}>
-                        {ef}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                <label className='flex items-center gap-1.5 text-xs pb-1.5 cursor-pointer'>
-                  <input
-                    type='checkbox'
-                    checked={simForceArgon}
-                    onChange={(e) => setSimForceArgon(e.target.checked)}
-                  />
-                  携带 X-Force-Argon 测试头
-                </label>
-                <Button
-                  type='button'
-                  size='sm'
-                  variant='secondary'
-                  onClick={() => void runSimulation(1)}
-                >
-                  单次路由仿真
-                </Button>
-                <Button
-                  type='button'
-                  size='sm'
-                  variant='outline'
-                  onClick={() => void runSimulation(40)}
-                >
-                  📊 40 次新会话分流比抽样
-                </Button>
-                {simOutput && (
-                  <div className='w-full mt-2 rounded border bg-muted/30 p-2.5 font-mono text-xs'>
-                    {simOutput}
+              <div className='grid grid-cols-2 gap-3 md:grid-cols-4'>
+                <div className='rounded-lg border bg-background p-3'>
+                  <div className='text-[11px] text-muted-foreground'>
+                    线上捕获真实请求数
                   </div>
-                )}
+                  <div className='mt-1 text-base font-bold font-mono'>
+                    {samples.length} 条
+                  </div>
+                  <div className='text-[11px] text-muted-foreground'>
+                    {samples[0]
+                      ? `最新: ${new Date(samples[0].captured_at_unix * 1000).toLocaleTimeString()}`
+                      : '等待线上流量进入'}
+                  </div>
+                </div>
+                <div className='rounded-lg border bg-background p-3'>
+                  <div className='text-[11px] text-muted-foreground'>
+                    CPA1 主池原生直连
+                  </div>
+                  <div className='mt-1 text-base font-bold font-mono text-emerald-600'>
+                    {samples.filter((s) => !s.disguise_enabled).length} 条 (
+                    {samples.length > 0
+                      ? Math.round(
+                          (samples.filter((s) => !s.disguise_enabled).length /
+                            samples.length) *
+                            100
+                        )
+                      : 100}
+                    %)
+                  </div>
+                  <div className='text-[11px] text-muted-foreground'>
+                    Astra / Sol / Terra 等主渠道直连
+                  </div>
+                </div>
+                <div className='rounded-lg border bg-background p-3'>
+                  <div className='text-[11px] text-muted-foreground'>
+                    CPA2 伪装/混池命中
+                  </div>
+                  <div className='mt-1 text-base font-bold font-mono text-amber-600'>
+                    {samples.filter((s) => s.disguise_enabled).length} 条 (
+                    {samples.length > 0
+                      ? Math.round(
+                          (samples.filter((s) => s.disguise_enabled).length /
+                            samples.length) *
+                            100
+                        )
+                      : 0}
+                    %)
+                  </div>
+                  <div className='text-[11px] text-muted-foreground'>
+                    含身份指令注入与响应脱敏
+                  </div>
+                </div>
+                <div className='rounded-lg border bg-background p-3'>
+                  <div className='text-[11px] text-muted-foreground'>
+                    线上活跃模型与强度
+                  </div>
+                  <div className='mt-1 text-xs font-mono truncate'>
+                    {samples.length > 0
+                      ? Object.entries(
+                          samples.reduce<Record<string, number>>((acc, s) => {
+                            const key = `${s.downstream_model} (${s.downstream_effort})`
+                            acc[key] = (acc[key] ?? 0) + 1
+                            return acc
+                          }, {})
+                        )
+                          .map(([k, v]) => `${k}: ${v}笔`)
+                          .join(' | ')
+                      : '暂无活跃模型统计'}
+                  </div>
+                  <div className='text-[11px] text-muted-foreground'>
+                    按最近捕获的线上真实调用聚合
+                  </div>
+                </div>
               </div>
 
               <div className='rounded-lg border bg-background p-3 space-y-2'>
                 <div className='flex items-center justify-between'>
                   <span className='text-xs font-medium'>
-                    最近捕获请求样本 ({samples.length} 条)
+                    线上真实请求路由与报文审计记录 ({samples.length} 条)
                   </span>
                   <Button
                     type='button'
@@ -2421,7 +2370,7 @@ function DisguiseRoutingSectionInner() {
                     className='h-7 text-xs'
                     onClick={() => void loadSamples()}
                   >
-                    刷新样本
+                    刷新线上记录
                   </Button>
                 </div>
                 {samples.length === 0 ? (

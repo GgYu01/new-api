@@ -79,8 +79,8 @@ export default defineConfig(({ envMode }) => {
         root: 'dist',
       },
       filename: {
-        js: '[name].r1314.[contenthash:10].js',
-        css: '[name].r1314.[contenthash:10].css',
+        js: '[name].r1315.[contenthash:10].js',
+        css: '[name].r1315.[contenthash:10].css',
       },
       // Rely on Rsbuild default legalComments ("linked" → per-chunk *.LICENSE.txt) in all modes.
       // Do not set "none" in production: that strips minifier-preserved third-party notices and

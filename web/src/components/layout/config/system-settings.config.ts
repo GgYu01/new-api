@@ -25,7 +25,6 @@ import {
   Settings,
   Shield,
   ShieldAlert,
-  Shuffle,
   Wrench,
 } from 'lucide-react'
 
@@ -53,12 +52,6 @@ function getSystemSettingsNavGroups(t: TFunction): NavGroup[] {
       id: 'system-administration',
       title: t('System Administration'),
       items: [
-        {
-          title: '伪装与混池路由 (TTFT)',
-          url: '/system-settings/request-policies/disguise',
-          activeUrls: ['/system-settings/request-policies/disguise'],
-          icon: Shuffle,
-        },
         {
           title: t('Site & Branding'),
           icon: Settings,
