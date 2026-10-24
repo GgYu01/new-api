@@ -78,6 +78,10 @@ export default defineConfig(({ envMode }) => {
       distPath: {
         root: 'dist',
       },
+      filename: {
+        js: '[name].r1313.[contenthash:10].js',
+        css: '[name].r1313.[contenthash:10].css',
+      },
       // Rely on Rsbuild default legalComments ("linked" → per-chunk *.LICENSE.txt) in all modes.
       // Do not set "none" in production: that strips minifier-preserved third-party notices and
       // extracted license files, which some distributions require for open-source compliance.
@@ -92,9 +96,9 @@ export default defineConfig(({ envMode }) => {
         plugins: [
           tanstackRouter({
             target: 'react',
-            // Dev: avoid per-route async chunks (reduces white flash on navigation + faster HMR feedback).
-            // Prod: keep route-based code splitting.
-            autoCodeSplitting: isProd,
+            // Avoid per-route async chunk fragmentation so rolling deployments and cached
+            // browser sessions never hit chunk/module-ID mismatches on nested settings routes.
+            autoCodeSplitting: false,
           }),
         ],
       },

@@ -6,7 +6,15 @@ it under the terms of the GNU Affero General Public License as
 published by the Free Software Foundation, either version 3 of the
 License, or (at your option) any later version.
 */
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import {
+  Component,
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+  type ErrorInfo,
+  type ReactNode,
+} from 'react'
 import { toast } from 'sonner'
 
 import { Badge } from '@/components/ui/badge'
@@ -347,7 +355,146 @@ function computeLocalTtftPreview(
 
 type ActiveTab = 'all' | 'ttft' | 'rules' | 'pools' | 'diag'
 
+function unwrapApiPayload<T>(res: unknown): T {
+  if (
+    res &&
+    typeof res === 'object' &&
+    'data' in res &&
+    (res as { data?: unknown }).data &&
+    typeof (res as { data?: unknown }).data === 'object'
+  ) {
+    return (res as { data: T }).data
+  }
+  return res as T
+}
+
+function normalizeDisguiseConfig(
+  raw: DisguiseRoutingConfig | undefined | null
+): DisguiseRoutingConfig | null {
+  if (
+    !raw ||
+    typeof raw !== 'object' ||
+    !Array.isArray(raw.rules) ||
+    !Array.isArray(raw.pools)
+  ) {
+    return null
+  }
+  const loadedTtft: TtftDistributionConfig = {
+    ...DEFAULT_TTFT_CONFIG,
+    ...(raw.ttft ?? raw.ttft_distribution ?? {}),
+  }
+  return {
+    ...raw,
+    pools: raw.pools.map((p) => ({
+      id: p?.id ?? 'cpa1',
+      name: p?.name ?? '',
+      base_url: p?.base_url ?? '',
+      api_key: p?.api_key ?? '',
+      enabled: Boolean(p?.enabled),
+      description: p?.description ?? '',
+    })),
+    rules: raw.rules.map((r) => ({
+      ...r,
+      id: r?.id ?? `rule-${Math.random().toString(36).slice(2, 7)}`,
+      name: r?.name ?? '',
+      enabled: Boolean(r?.enabled),
+      priority: Number(r?.priority) || 10,
+      model_patterns: Array.isArray(r?.model_patterns) ? r.model_patterns : [],
+      mode: r?.mode ?? 'weighted_mix',
+      sticky_session: {
+        enabled: Boolean(r?.sticky_session?.enabled ?? true),
+        min_soft_turns: Number(r?.sticky_session?.min_soft_turns) || 5,
+        max_soft_turns: Number(r?.sticky_session?.max_soft_turns) || 9,
+        ttl_seconds: Number(r?.sticky_session?.ttl_seconds) || 240,
+        failover_on_error: Boolean(
+          r?.sticky_session?.failover_on_error ?? true
+        ),
+      },
+      targets: Array.isArray(r?.targets)
+        ? r.targets.map((t) => ({
+            ...t,
+            target_id: t?.target_id ?? 'target',
+            pool_id: t?.pool_id ?? 'cpa1',
+            weight: Number(t?.weight) || 0,
+            upstream_model: t?.upstream_model ?? '',
+            disguise_enabled: Boolean(t?.disguise_enabled),
+            protocol_family: t?.protocol_family ?? 'openai_native',
+            masquerade_model: t?.masquerade_model ?? '$clean_model',
+            masquerade_provider: t?.masquerade_provider ?? 'OpenAI',
+            inject_identity_prompt: Boolean(t?.inject_identity_prompt),
+            scrub_response_identity: Boolean(t?.scrub_response_identity),
+            effort_map: Array.isArray(t?.effort_map)
+              ? t.effort_map.map((em) => ({
+                  ...em,
+                  downstream_efforts: Array.isArray(em?.downstream_efforts)
+                    ? em.downstream_efforts
+                    : [],
+                  upstream_model_override: em?.upstream_model_override ?? '',
+                  upstream_effort: em?.upstream_effort ?? 'high',
+                  thinking_budget:
+                    em?.thinking_budget === undefined
+                      ? null
+                      : em.thinking_budget,
+                }))
+              : [],
+          }))
+        : [],
+      notes: r?.notes ?? '',
+    })),
+    ttft: loadedTtft,
+    ttft_distribution: loadedTtft,
+  }
+}
+
+class DisguiseConsoleErrorBoundary extends Component<
+  { children: ReactNode },
+  { error: Error | null }
+> {
+  constructor(props: { children: ReactNode }) {
+    super(props)
+    this.state = { error: null }
+  }
+
+  static getDerivedStateFromError(error: Error) {
+    return { error }
+  }
+
+  override componentDidCatch(error: Error, info: ErrorInfo) {
+    // eslint-disable-next-line no-console
+    console.error('[DisguiseRoutingSection] render error:', error, info)
+  }
+
+  override render() {
+    if (this.state.error) {
+      return (
+        <div className='rounded-xl border border-destructive/40 bg-card p-5 space-y-3'>
+          <div className='text-sm font-semibold text-destructive'>
+            伪装与混池控制台渲染异常：{this.state.error.message}
+          </div>
+          <Button
+            type='button'
+            size='sm'
+            variant='outline'
+            onClick={() => this.setState({ error: null })}
+          >
+            重新加载控制台
+          </Button>
+        </div>
+      )
+    }
+    return this.props.children
+  }
+}
+
 export function DisguiseRoutingSection() {
+  return (
+    <DisguiseConsoleErrorBoundary>
+      <DisguiseRoutingSectionInner />
+    </DisguiseConsoleErrorBoundary>
+  )
+}
+
+function DisguiseRoutingSectionInner() {
   const userRole = useAuthStore((s) => s.auth.user?.role ?? ROLE.ADMIN)
   const isAdmin = userRole >= ROLE.ADMIN
 
@@ -382,14 +529,14 @@ export function DisguiseRoutingSection() {
         config?: DisguiseRoutingConfig
         message?: string
       }>('/api/disguise-routing/config')
-      if (res.config) {
-        const loadedTtft =
-          res.config.ttft ??
-          res.config.ttft_distribution ??
-          DEFAULT_TTFT_CONFIG
-        res.config.ttft = { ...loadedTtft }
-        res.config.ttft_distribution = { ...loadedTtft }
-        setConfig(res.config)
+      const payload = unwrapApiPayload<{
+        success?: boolean
+        config?: DisguiseRoutingConfig
+        message?: string
+      }>(res)
+      const normalized = normalizeDisguiseConfig(payload?.config)
+      if (normalized) {
+        setConfig(normalized)
       }
     } catch (err) {
       toast.error(err instanceof Error ? err.message : '加载配置失败')
@@ -404,7 +551,11 @@ export function DisguiseRoutingSection() {
         success: boolean
         samples?: CapturedSample[]
       }>('/api/disguise-routing/samples')
-      setSamples(res.samples ?? [])
+      const payload = unwrapApiPayload<{
+        success?: boolean
+        samples?: CapturedSample[]
+      }>(res)
+      setSamples(Array.isArray(payload?.samples) ? payload.samples : [])
     } catch {
       // ignore
     }
@@ -492,8 +643,11 @@ export function DisguiseRoutingSection() {
           sample_count: 1200,
         }
       )
-      if (res && res.summary && res.buckets) {
-        setServerPreview(res)
+      const payload = unwrapApiPayload<TtftPreviewData & { success?: boolean }>(
+        res
+      )
+      if (payload && payload.summary && Array.isArray(payload.buckets)) {
+        setServerPreview(payload)
         toast.success('已从 Rust 加速器实时抽样 1200 次生成分布图')
       } else {
         setPreviewSeed((x) => x + 1)
@@ -512,15 +666,17 @@ export function DisguiseRoutingSection() {
         config?: DisguiseRoutingConfig
         message?: string
       }>('/api/disguise-routing/config', config)
-      if (!res.success || !res.config) {
-        toast.error(res.message || '保存失败')
+      const payload = unwrapApiPayload<{
+        success?: boolean
+        config?: DisguiseRoutingConfig
+        message?: string
+      }>(res)
+      const normalized = normalizeDisguiseConfig(payload?.config)
+      if (!payload?.success || !normalized) {
+        toast.error(payload?.message || '保存失败')
         return
       }
-      const loadedTtft =
-        res.config.ttft ?? res.config.ttft_distribution ?? DEFAULT_TTFT_CONFIG
-      res.config.ttft = { ...loadedTtft }
-      res.config.ttft_distribution = { ...loadedTtft }
-      setConfig(res.config)
+      setConfig(normalized)
       toast.success('配置已保存并同步至本地 Rust 加速器与 PostgreSQL 数据库')
     } catch (err) {
       toast.error(err instanceof Error ? err.message : '保存失败')
@@ -543,12 +699,13 @@ export function DisguiseRoutingSection() {
         success: boolean
         config?: DisguiseRoutingConfig
       }>('/api/disguise-routing/reset')
-      if (res.config) {
-        const loadedTtft =
-          res.config.ttft ?? res.config.ttft_distribution ?? DEFAULT_TTFT_CONFIG
-        res.config.ttft = { ...loadedTtft }
-        res.config.ttft_distribution = { ...loadedTtft }
-        setConfig(res.config)
+      const payload = unwrapApiPayload<{
+        success?: boolean
+        config?: DisguiseRoutingConfig
+      }>(res)
+      const normalized = normalizeDisguiseConfig(payload?.config)
+      if (normalized) {
+        setConfig(normalized)
         setServerPreview(null)
         toast.success('已恢复推荐默认配置')
       }
@@ -564,7 +721,7 @@ export function DisguiseRoutingSection() {
     updater: (r: ModelRoutingRule) => ModelRoutingRule
   ) => {
     if (!config) return
-    const nextRules = config.rules.map((r, i) =>
+    const nextRules = (config.rules ?? []).map((r, i) =>
       i === ruleIdx ? updater(r) : r
     )
     setConfig({ ...config, rules: nextRules })
@@ -720,13 +877,13 @@ export function DisguiseRoutingSection() {
       }
     }
     setExpandedRuleIds((prev) => ({ ...prev, [newId]: true }))
-    setConfig({ ...config, rules: [newRule, ...config.rules] })
+    setConfig({ ...config, rules: [newRule, ...(config.rules ?? [])] })
     toast.success('已添加新伪装规则，配置完成后请点击右上角「保存并全节点热生效」')
   }
 
   const removeRule = (ruleIdx: number) => {
     if (!config) return
-    const nextRules = config.rules.filter((_, i) => i !== ruleIdx)
+    const nextRules = (config.rules ?? []).filter((_, i) => i !== ruleIdx)
     setConfig({ ...config, rules: nextRules })
   }
 
@@ -736,7 +893,7 @@ export function DisguiseRoutingSection() {
     val: string | boolean
   ) => {
     if (!config) return
-    const nextPools = config.pools.map((p, i) =>
+    const nextPools = (config.pools ?? []).map((p, i) =>
       i === poolIdx ? { ...p, [field]: val } : p
     )
     setConfig({ ...config, pools: nextPools })
@@ -754,8 +911,12 @@ export function DisguiseRoutingSection() {
           session_id: `sim_${Date.now()}`,
           force_argon: simForceArgon,
         })
-        if (res.plan) {
-          const p = res.plan
+        const payload = unwrapApiPayload<{
+          success?: boolean
+          plan?: Record<string, unknown>
+        }>(res)
+        if (payload?.plan) {
+          const p = payload.plan
           setSimOutput(
             `命中规则: ${String(p.matched_rule_name)} (${String(p.matched_rule_id)}) | 选定目标池: ${String(p.selected_pool_id)} | 上游模型: ${String(p.upstream_model)} (effort=${String(p.upstream_effort)}${p.thinking_budget ? `, budget=${String(p.thinking_budget)}` : ''}) | 伪装开启: ${p.disguise_enabled ? '✅ 是 (身份注入+痕迹抹除)' : '⚡ 否 (CPA1 原生直连)'}`
           )
@@ -772,8 +933,12 @@ export function DisguiseRoutingSection() {
             session_id: `batch_${Date.now()}_${i}_${Math.random()}`,
             force_argon: simForceArgon,
           })
-          if (res.plan) {
-            const k = `${String(res.plan.selected_pool_id)} -> ${String(res.plan.upstream_model)} (${res.plan.disguise_enabled ? '伪装' : '原生'})`
+          const payload = unwrapApiPayload<{
+            success?: boolean
+            plan?: Record<string, unknown>
+          }>(res)
+          if (payload?.plan) {
+            const k = `${String(payload.plan.selected_pool_id)} -> ${String(payload.plan.upstream_model)} (${payload.plan.disguise_enabled ? '伪装' : '原生'})`
             counts[k] = (counts[k] ?? 0) + 1
           }
         }
@@ -793,10 +958,10 @@ export function DisguiseRoutingSection() {
   if (!isAdmin) return null
 
   const anyMixEnabled = Boolean(
-    config?.rules.some(
+    (config?.rules ?? []).some(
       (r) =>
-        r.enabled &&
-        r.targets.some((t) => t.pool_id === 'cpa2' && t.weight > 0)
+        r?.enabled &&
+        (r?.targets ?? []).some((t) => t?.pool_id === 'cpa2' && (t?.weight ?? 0) > 0)
     )
   )
 

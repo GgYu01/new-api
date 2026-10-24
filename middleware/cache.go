@@ -16,7 +16,7 @@ func Cache() func(c *gin.Context) {
 			c.Header("Pragma", "no-cache")
 			c.Header("Expires", "0")
 		}
-		c.Header("Cache-Version", "r13.4-20261015-clean-chunks")
+		c.Header("Cache-Version", "r13.13-20261024-clean")
 		c.Next()
 	}
 }

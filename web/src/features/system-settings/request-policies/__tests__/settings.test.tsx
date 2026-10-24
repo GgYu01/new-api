@@ -365,4 +365,141 @@ describe('request policy settings', () => {
     )
     expect(api.put).not.toHaveBeenCalled()
   })
+
+  it('opens /system-settings/request-policies/disguise with AxiosResponse.config without crashing', async () => {
+    vi.spyOn(api, 'get').mockImplementation(async (url) => {
+      if (url === '/api/option/') return { data: optionsResponse() }
+      if (url === '/api/disguise-routing/config') {
+        return {
+          status: 200,
+          // Simulate AxiosResponse.config request metadata collision
+          config: { url: '/api/disguise-routing/config', method: 'get' },
+          data: {
+            success: true,
+            config: {
+              version: 1,
+              updated_at_unix: 1792813941,
+              pools: [
+                {
+                  id: 'cpa1',
+                  name: 'CPA1 主池 (默认直连主渠道)',
+                  base_url: 'https://cpa.s1.prod.gglohh.top',
+                  api_key: '',
+                  enabled: true,
+                  description: 'NewAPI 默认主渠道指向的 CPA1 池',
+                },
+                {
+                  id: 'cpa2',
+                  name: 'CPA2 备用伪装池',
+                  base_url: 'https://cpa2.s1.prod.gglohh.top',
+                  api_key: '***',
+                  enabled: true,
+                  description: '独立 CPA2 伪装池',
+                },
+              ],
+              rules: [
+                {
+                  id: 'rule-sol-terra-weighted-mix',
+                  name: 'Sol / Terra 权重混池规则',
+                  enabled: false,
+                  priority: 20,
+                  model_patterns: ['*-sol', '*-terra'],
+                  mode: 'weighted_mix',
+                  sticky_session: {
+                    enabled: true,
+                    min_soft_turns: 5,
+                    max_soft_turns: 9,
+                    ttl_seconds: 240,
+                    failover_on_error: true,
+                  },
+                  targets: [
+                    {
+                      target_id: 'cpa1-main',
+                      pool_id: 'cpa1',
+                      weight: 100,
+                      upstream_model: '$clean_model',
+                      disguise_enabled: false,
+                      protocol_family: 'openai_native',
+                      masquerade_model: '$clean_model',
+                      masquerade_provider: 'OpenAI',
+                      inject_identity_prompt: false,
+                      scrub_response_identity: true,
+                      effort_map: [
+                        {
+                          downstream_efforts: ['high', 'xhigh'],
+                          upstream_model_override: 'gpt-6.1-sol',
+                          upstream_effort: 'high',
+                          thinking_budget: 28672,
+                        },
+                      ],
+                    },
+                  ],
+                  notes: '默认关闭混流',
+                },
+              ],
+              ttft: {
+                enabled: true,
+                preset: 'fast_core',
+                min_ms: 1200,
+                core_ms: 2500,
+                primary_upper_ms: 4000,
+                normal_max_ms: 6000,
+                tail_max_ms: 12000,
+                tail_probability_pct: 5,
+                spread_randomness: 68,
+              },
+            },
+          },
+        }
+      }
+      if (url === '/api/disguise-routing/samples') {
+        return {
+          status: 200,
+          config: { url: '/api/disguise-routing/samples', method: 'get' },
+          data: {
+            success: true,
+            samples: [
+              {
+                id: 'smp-1',
+                captured_at_unix: 1792813941,
+                expires_at_unix: 1792828341,
+                endpoint_path: '/v1/responses',
+                downstream_model: 'gpt-6.1-sol',
+                downstream_effort: 'xhigh',
+                matched_rule_id: 'rule-sol-terra-weighted-mix',
+                routing_mode: 'weighted_mix',
+                selected_pool_id: 'cpa1',
+                upstream_model: 'gpt-6.1-sol',
+                upstream_effort: 'xhigh',
+                disguise_enabled: false,
+                session_key: 'sess-1',
+                client_headers: {},
+                body_structure_summary: {},
+                raw_body_preview: '{"model":"gpt-6.1-sol"}',
+                rewritten_body_preview: '{"model":"gpt-6.1-sol"}',
+                body_total_bytes: 128,
+              },
+            ],
+          },
+        }
+      }
+      return { data: { success: true, data: {} } }
+    })
+
+    const router = await renderPolicies(
+      '/system-settings/request-policies/disguise'
+    )
+    expect(router.state.location.pathname).toBe(
+      '/system-settings/request-policies/disguise'
+    )
+    expect(
+      await screen.findByText(/伪装与混池路由控制台/)
+    ).toBeInTheDocument()
+    expect(
+      await screen.findByDisplayValue('Sol / Terra 权重混池规则')
+    ).toBeInTheDocument()
+    expect(
+      (await screen.findAllByText(/CPA1 主池 \(默认直连主渠道\)/)).length
+    ).toBeGreaterThan(0)
+  })
 })
